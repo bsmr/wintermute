@@ -64,3 +64,6 @@ Thumbs.db
 .vscode/
 *.swp
 *~
+
+# Go build output
+bin/

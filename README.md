@@ -22,7 +22,7 @@ The transpilation is driven by AI, making it possible to express concurrent, fau
 
 ```bash
 # Coming soon
-go install github.com/bsmr/wintermute/cmd/wm@latest
+go install go.muehmer.eu/wintermute/cmd/wm@latest
 ```
 
 ---
