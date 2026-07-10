@@ -45,3 +45,21 @@ bin/               # build output (gitignored)
 ## Build
 
 - `go build -o bin/wm ./cmd/wm` — never bare `go build`.
+
+## Git Workflow (project override)
+
+Deviates from the global convention: this project has no shared read-write team
+remote. Three remotes, only `origin` is developed on:
+
+| Remote | URL | Role |
+|---|---|---|
+| `origin` | `git@git.nebula.muehmer.eu:bsmr/wintermute.git` | private fork — all development happens here |
+| `upstream` | `git@git.nebula.muehmer.eu:Go/wintermute.git` | **gated** — release target only |
+| `github` | `https://github.com/bsmr/wintermute.git` | **gated** — external mirror, release target only |
+
+- **Development**: on `origin`, feature branches `<name>-main` / `<name>-work`
+  (`-main` holds the base from `main`, `-work` is the workspace).
+- **Gated remotes** (`upstream`, `github`): never receive direct dev pushes.
+  Only fast-forward, squashed merges land on `main` first, then `main` is pushed
+  to `upstream`/`github` as **tagged** releases. Milestones may get their own
+  named branches.
