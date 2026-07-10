@@ -6,7 +6,7 @@
 > *"Wintermute was hive mind, decision maker, effector of change."*
 > — William Gibson, Neuromancer
 
-A KI-driven **Go → Erlang/OTP** transpiler. CLI binary: `wm`.
+A **Go → Erlang/OTP** transpiler. CLI binary: `wm`.
 
 ---
 
@@ -14,7 +14,9 @@ A KI-driven **Go → Erlang/OTP** transpiler. CLI binary: `wm`.
 
 Wintermute takes Go source code and transpiles it to Erlang/OTP. Named after the AI in William Gibson's *Neuromancer* that bridges two separate systems into one — just as Wintermute bridges the Go and BEAM worlds.
 
-The transpilation is driven by AI, making it possible to express concurrent, fault-tolerant Erlang/OTP idioms from idiomatic Go code.
+Wintermute *itself* is developed AI-first; the transpiler it produces is a
+deterministic Go-AST → Erlang compiler, not an LLM at runtime. The goal: express
+concurrent, fault-tolerant Erlang/OTP idioms from idiomatic Go code.
 
 ---
 

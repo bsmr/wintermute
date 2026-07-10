@@ -1,6 +1,8 @@
 # CLAUDE.md — Wintermute
 
-AI-driven **Go → Erlang/OTP** transpiler. CLI binary: `wm`.
+AI-first-developed **Go → Erlang/OTP** transpiler. CLI binary: `wm`.
+(The transpiler is a deterministic go/ast → Erlang compiler — no LLM at runtime;
+"AI-first" describes how Wintermute is built, not how it transpiles.)
 Module: `go.muehmer.eu/wintermute`.
 
 ## Language & Communication
