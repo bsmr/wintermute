@@ -58,4 +58,5 @@ This project is in its earliest stages. Nothing works yet. Contributions, ideas,
 
 ## License
 
-[MIT](LICENSE) © 2026 bsmr
+[MIT](LICENSE) © 2026 Boris Mühmer
+
