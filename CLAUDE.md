@@ -64,7 +64,13 @@ bin/               # build output (gitignored)
 ## Third opinion (GitHub Copilot)
 
 Before any commit that goes toward `github`, get a third opinion from GitHub
-Copilot (`gh copilot`) as a review gate. Not yet installed — see the setup TODO.
+Copilot as a review gate. Non-interactive invocation (costs AI credits per call):
+
+```bash
+gh copilot -- -p "Review the staged git diff for correctness, DRY/KISS, and Go best practices." --allow-all-tools
+```
+
+Installed via the `gh copilot` built-in (native binary in `~/.local/share/gh/copilot`).
 
 ## Git Workflow (project override)
 
