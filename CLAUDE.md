@@ -9,11 +9,19 @@ Module: `go.muehmer.eu/wintermute`.
 - **Everything else** (code, commits, code comments, file contents): always in English.
 - **Style (all languages)**: precise, concise, technical. No filler.
 
-## Go: main() → run() Pattern
+## Go: strict rules
 
-`main()` is a thin wrapper; `run()` is wiring only. Application logic lives in
-`internal/pkg/`, receives all dependencies (`context.Context`, `args`, `io.Reader`/`io.Writer`)
-as parameters, and is fully unit-tested.
+These are non-negotiable for this project.
+
+- **TDD, red → green first**: write the failing test, watch it fail, then
+  implement until green. Tests before implementation, always.
+- **main() → run() pattern**: `main()` is a thin wrapper; `run()` is wiring only.
+  All application logic lives in a package under `internal/pkg/` and is fully
+  covered by TDD. `main()` only calls `run()` and handles `os.Exit`. Errors are
+  returned, not logged-and-exited. Dependencies (`context.Context`, `args`,
+  `io.Reader`/`io.Writer`) are injected as parameters.
+- **DRY & KISS + Go best practices** (Google Go Style Guide): apply and review
+  them on every change.
 
 ```go
 func main() {
@@ -30,21 +38,33 @@ func run() error {
 }
 ```
 
-- `main()` only calls `run()` and handles `os.Exit` — never in `run()`.
-- Errors are returned, not logged-and-exited.
-- Every package MUST have `_test.go` files with meaningful coverage. Test first.
-
 ## Structure
 
 ```text
-cmd/wm/            # entry point (wiring only)
-internal/pkg/cli/  # command dispatcher and business logic
+cmd/<app>/         # public entry points (wiring only)
+pkg/               # public library packages
+internal/pkg/      # internal library packages (all business logic, TDD-covered)
+internal/cmd/      # internal tools / generators — same main() → run() pattern
 bin/               # build output (gitignored)
 ```
 
-## Build
+- Internal packages → `internal/pkg/`; public packages → `pkg/`.
+- Internal tools (generators) → `internal/cmd/`, same `main()` → `run()` pattern.
 
-- `go build -o bin/wm ./cmd/wm` — never bare `go build`.
+## Build & Tooling
+
+- Binaries always to `bin/`: `go build -o bin/wm ./cmd/wm` — never bare `go build`.
+- **No temporary files in the project root.**
+- **Avoid Makefiles.** Prefer `go install …` / `go get …` for tasks and tools.
+- **Security tests / tooling**:
+  - Go tools: install via `go install …`.
+  - Python tools: own venv under `.python/venv/`.
+  - Node.js tools: avoid. If unavoidable, the install method must be clarified first.
+
+## Third opinion (GitHub Copilot)
+
+Before any commit that goes toward `github`, get a third opinion from GitHub
+Copilot (`gh copilot`) as a review gate. Not yet installed — see the setup TODO.
 
 ## Git Workflow (project override)
 
