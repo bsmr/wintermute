@@ -48,6 +48,14 @@ wm repl
 
 ---
 
+## Prerequisites
+
+`wm erlang install` builds Erlang/OTP from source under `~/.local/erlang/<ver>/`.
+It requires a C compiler (`cc`/`gcc`), `make`, `m4`, `perl`, `tar`, and the
+`ncurses` and `openssl` development headers (e.g. `libncurses-dev`,
+`libssl-dev` on Debian/Ubuntu). `wm erlang install` checks the build tools up front and fails
+fast with the missing ones named.
+
 ## Status
 
 > ⚠️ **Early Development / Experimental**

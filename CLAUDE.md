@@ -22,6 +22,10 @@ These are non-negotiable for this project.
   `io.Reader`/`io.Writer`) are injected as parameters.
 - **DRY & KISS + Go best practices** (Google Go Style Guide): apply and review
   them on every change.
+- **Stdlib first. No third-party modules.** The project depends only on the Go
+  standard library. If a problem seems to require a foreign module, it must be
+  discussed and agreed first — never added silently. (Tools installed via
+  `go install` are not project dependencies and are exempt.)
 
 ```go
 func main() {
