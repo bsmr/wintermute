@@ -57,9 +57,15 @@ bin/               # build output (gitignored)
 - **No temporary files in the project root.**
 - **Avoid Makefiles.** Prefer `go install …` / `go get …` for tasks and tools.
 - **Security tests / tooling**:
-  - Go tools: install via `go install …`.
-  - Python tools: own venv under `.python/venv/`.
+  - Go tools: install via `go install …` (land in `$(go env GOPATH)/bin`).
+  - Python tools: own venv under `~/.python/venv/wintermute/`.
   - Node.js tools: avoid. If unavoidable, the install method must be clarified first.
+  - Installed set:
+    - `govulncheck` — dependency/stdlib CVEs (`go install golang.org/x/vuln/cmd/govulncheck@latest`)
+    - `gosec` — Go SAST (`go install github.com/securego/gosec/v2/cmd/gosec@latest`)
+    - `gitleaks` — secret scanning (`go install github.com/zricethezav/gitleaks/v8@latest`)
+    - `semgrep` — deeper SAST, in the venv (`~/.python/venv/wintermute/bin/semgrep`)
+  - Run: `govulncheck ./...`, `gosec ./...`, `gitleaks detect`, `~/.python/venv/wintermute/bin/semgrep --config auto`.
 
 ## Third opinion (GitHub Copilot)
 
