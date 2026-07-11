@@ -4,20 +4,22 @@ Snapshot for resuming work in a fresh session. Updated 2026-07-11.
 
 ## Where things stand
 
-**0.2.4 persistent node is feature-complete on `development-0.2.4-work` (HEAD
-`979b90b`, 14/14 tasks TDD'd + a final-review critical fix), verification gate green.**
-The whole-branch review (opus) caught a **critical bug the mocked unit tests and the
-`startCmd`-bypassing ladder never covered**: `wm start` never emitted `<app>.app`, so
-`application:start` failed silently on the detached node (a `-detached` boot exits 0
-regardless), and — found via the fix's real-flow e2e test — `wm call` never
-ping/sync-connected to the node so `{global, echo}` never resolved. Both fixed
-(`8df00fe`) with a new **unmocked** integration test (`start_integration_test.go`,
-`TestStartBootsAppEndToEnd`) that drives the real `start → status → call → stop` flow
-and asserts the app actually runs + echoes `hello`; assertion tightened in `979b90b`.
-Lesson: `run-real-toolchain-build-early` — green mocked tests + a ladder that hand-rolls
-its own boot did not exercise the flagship CLI path.
-Not yet merged to `main` — per the git workflow, the next step is the squash-merge
-`-work` → `-main` → `main` (see "Next step" below), intentionally outside this task's scope.
+**0.2.4 persistent node is RELEASED: squash-merged to `main`, tagged `v0.2.4`, pushed
+to ALL THREE remotes (`origin`, `upstream`, `github`).** It is the fifth step of the
+0.2.x line (single-node → distributed → gen_server → application → persistent node).
+The 14-task SDD build (`development-0.2.4-work`, archived on origin) was TDD'd task-by-task
+with two-stage review; two gates then found real defects, folded into the release:
+- **Whole-branch review (opus)** caught a critical bug the mocked unit tests and the
+  `startCmd`-bypassing ladder never covered: `wm start` never emitted `<app>.app`, so
+  `application:start` failed silently on the detached node (a `-detached` boot exits 0
+  regardless), and `wm call` never ping/sync-connected to the node. Both fixed (`8df00fe`)
+  with an **unmocked** e2e test (`start_integration_test.go`, `TestStartBootsAppEndToEnd`)
+  driving the real `start → status → call → stop` flow. Lesson: `run-real-toolchain-build-early`.
+- **Copilot review gate** (run before the github push) found an eval-injection (High) and a
+  path-traversal (Medium) in the new CLI name handling; both fixed (`83e9a91`) with
+  `validAtom`/`validNodeName`/`validAppName` guards + tests.
+The completed 0.2.x line is promoted to **0.3.0** after a further review + fix session
+(see the `release-versioning-model` memory).
 **0.2.3 OTP application deployment remains released on `main` = `a1e441d`, tagged
 `v0.2.3`,** fast-forward-pushed to ALL THREE remotes (`origin`, `upstream`, `github`).
 The completed 0.2.x line is promoted to **0.3.0** after a further Copilot review + fix
@@ -154,9 +156,9 @@ The staged deployment plan (agreed during the 0.2.3 brainstorm; B now done) is:
   for what Go can't express but OTP needs (records, macros, guards). See the
   `native-erlang-interop-open-question` memory. After the deployment foundation.
 
-Start 0.2.5 like the prior steps: merge 0.2.4 to `main` first, then branch
-(`development-0.2.5-main`/`-work` from `main`, `printf '0.2.5\n' > VERSION`), then
-`superpowers:brainstorming` → spec → plan → execute.
+Start 0.2.5 like the prior steps: branch (`development-0.2.5-main`/`-work` from `main`,
+`printf '0.2.5\n' > VERSION`), then `superpowers:brainstorming` → spec → plan → execute.
+(0.2.4 is already merged to `main` and pushed to all three remotes tagged `v0.2.4`.)
 
 ## 0.2.x backlog (deferred, per-task + final reviews)
 
@@ -191,10 +193,17 @@ Start 0.2.5 like the prior steps: merge 0.2.4 to `main` first, then branch
   remotes. **`wm stop` honesty:** success is the control-node exit code only; `rpc:call`
   returning `{badrpc, …}` (node already dead) still exits 0, so the State-File is removed
   regardless — desired for "already dead", but does not distinguish a clean stop from a
-  no-op. **Eval interpolation not escaped:** node name (`stop`/`status`) and gen_server
-  `name` (`call`) are interpolated raw into the control-node `-eval`; a crafted
-  `--name`/`<name>` injects Erlang into the user's own short-lived control node
-  (self-inflicted, not privilege escalation) — worth a guard. **Ladder/e2e robustness:**
+  no-op. **Eval injection + path traversal — FIXED (`83e9a91`, Copilot gate):** the
+  gen_server `name` (`call`), the node name (`--name`, spliced into stop/status/call
+  `-eval`), and the app name (`stop`/`status`/`call --app`/`attach`, into `statePath`)
+  are now validated — `validAtom` (`^[a-z][a-zA-Z0-9_]*$`), `validNodeName`
+  (`^[A-Za-z0-9_]+@[A-Za-z0-9_.-]+$`), `validAppName` (rejects empty / `/` / `\` / `..`)
+  — so a crafted name can no longer inject Erlang into the control node or escape the
+  state dir. Verified: RE2 `$` = `\z` (no trailing-newline bypass), char classes exclude
+  `\n`. Residual defense-in-depth nicety (not exploitable): `application:start(%s)` splices
+  `appMod` raw; `appMod` is the transpiler's Go-package-derived module name (atom-safe by
+  construction, and a non-atom name breaks transpilation everywhere), so it is safe — a
+  `validAtom(appMod)` guard would make the invariant self-evident. **Ladder/e2e robustness:**
   `runPersistent` folds stderr into the `== "hello"` assertion (fail-closed,
   false-negative only); no `exec`/context timeout on the caller; hardcoded `vsn "0.2.4"`
   in `transpilePersistentApp`.
