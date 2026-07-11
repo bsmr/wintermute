@@ -228,3 +228,67 @@ func TestFile_ReturnsModuleName(t *testing.T) {
 		t.Fatalf("module = %q, want echoserver", mod)
 	}
 }
+
+func TestFile_RegisterGlobal(t *testing.T) {
+	src := `package m
+import "go.muehmer.eu/wintermute/pkg/otp"
+func Serve() {}
+func Start() { otp.RegisterGlobal("echo", otp.Spawn(Serve)) }
+`
+	got, _, err := File(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(got, "global:register_name(echo, spawn(fun ?MODULE:serve/0))") {
+		t.Fatalf("got:\n%s", got)
+	}
+}
+
+func TestFile_WhereisGlobal(t *testing.T) {
+	src := `package m
+import "go.muehmer.eu/wintermute/pkg/otp"
+func Main() { otp.Send(otp.WhereisGlobal("echo"), otp.Self()) }
+`
+	got, _, err := File(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(got, "global:whereis_name(echo) ! self()") {
+		t.Fatalf("got:\n%s", got)
+	}
+}
+
+func TestFile_GoldenDistServer(t *testing.T) {
+	src, err := os.ReadFile("../../../testdata/echo-dist/go/echoserver/main.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, _, err := File(string(src))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"-module(echoserver).",
+		"receive\n        {echo, From, Text} ->",
+		"From ! {ok, Text}",
+		"start() -> global:register_name(echo, spawn(fun ?MODULE:serve/0)).",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("missing %q in:\n%s", want, got)
+		}
+	}
+}
+
+func TestFile_GoldenDistClient(t *testing.T) {
+	src, err := os.ReadFile("../../../testdata/echo-dist/go/echoclient/main.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, _, err := File(string(src))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(got, "global:whereis_name(echo) ! {echo, self(), <<\"hello\">>}") {
+		t.Fatalf("missing global:whereis_name send in:\n%s", got)
+	}
+}

@@ -312,6 +312,10 @@ func (em *emitter) emitCall(c *ast.CallExpr) (string, error) {
 		return fmt.Sprintf("register(%s, %s)", unquoteAtom(args[0]), args[1]), nil
 	case "Whereis":
 		return fmt.Sprintf("whereis(%s)", unquoteAtom(args[0])), nil
+	case "RegisterGlobal":
+		return fmt.Sprintf("global:register_name(%s, %s)", unquoteAtom(args[0]), args[1]), nil
+	case "WhereisGlobal":
+		return fmt.Sprintf("global:whereis_name(%s)", unquoteAtom(args[0])), nil
 	case "Self":
 		return "self()", nil
 	case "Print":

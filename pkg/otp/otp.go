@@ -19,6 +19,9 @@ func Self() Pid                   { transpileOnly("Self"); return Pid{} }    // 
 func Spawn(fn func()) Pid         { transpileOnly("Spawn"); return Pid{} }   // -> spawn(fun ... end)
 func Register(name string, p Pid) { transpileOnly("Register") }              // -> register(name, Pid)
 func Whereis(name string) Pid     { transpileOnly("Whereis"); return Pid{} } // -> whereis(name)
-func Send(to Pid, msg any)        { transpileOnly("Send") }                  // -> To ! Msg
-func Receive() any                { transpileOnly("Receive"); return nil }   // -> receive <clause> end
-func Print(s string)              { transpileOnly("Print") }                 // -> io:format("~s~n", [S])
+
+func RegisterGlobal(name string, p Pid) { transpileOnly("RegisterGlobal") }              // -> global:register_name(name, Pid)
+func WhereisGlobal(name string) Pid     { transpileOnly("WhereisGlobal"); return Pid{} } // -> global:whereis_name(name)
+func Send(to Pid, msg any)              { transpileOnly("Send") }                        // -> To ! Msg
+func Receive() any                      { transpileOnly("Receive"); return nil }         // -> receive <clause> end
+func Print(s string)                    { transpileOnly("Print") }                       // -> io:format("~s~n", [S])
