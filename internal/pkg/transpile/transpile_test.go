@@ -570,3 +570,47 @@ func Bad() { otp.Call("x") }
 		t.Fatalf("error should name the call, got: %v", err)
 	}
 }
+
+func TestTranspileStartServerGlobal(t *testing.T) {
+	src := `package echoserver
+import "go.muehmer.eu/wintermute/pkg/otp"
+type State struct{ Count int }
+func (State) Init() State { return State{Count: 0} }
+func (s State) HandleCall(Req string) (string, State) { return Req, State{Count: s.Count + 1} }
+func Start() { otp.StartServerGlobal("echo", State{Count: 0}) }
+`
+	r, err := Module(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(r.Erl, "gen_server:start_link({global, echo}, ?MODULE, [], [])") {
+		t.Fatalf("missing global start_link:\n%s", r.Erl)
+	}
+	if len(r.Registered) != 0 {
+		t.Fatalf("global server must not populate Registered, got %v", r.Registered)
+	}
+}
+
+func TestTranspileCallGlobal(t *testing.T) {
+	src := `package echoclient
+import "go.muehmer.eu/wintermute/pkg/otp"
+func Main() { otp.Print(otp.CallGlobal("echo", "hello").(string)) }
+`
+	r, err := Module(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(r.Erl, `gen_server:call({global, echo}, <<"hello">>)`) {
+		t.Fatalf("missing global call:\n%s", r.Erl)
+	}
+}
+
+func TestTranspileCallGlobalWrongArity(t *testing.T) {
+	src := `package c
+import "go.muehmer.eu/wintermute/pkg/otp"
+func Main() { otp.CallGlobal("echo") }
+`
+	if _, err := Module(src); err == nil {
+		t.Fatal("expected positioned arity error, got nil")
+	}
+}

@@ -29,6 +29,9 @@ func Print(s string)                    { transpileOnly("Print") }              
 func StartServer(name string, init any) { transpileOnly("StartServer") }      // -> gen_server:start_link({local,name}, ?MODULE, [], [])
 func Call(name string, req any) any     { transpileOnly("Call"); return nil } // -> gen_server:call(name, Req)
 
+func StartServerGlobal(name string, init any) { transpileOnly("StartServerGlobal") } // -> gen_server:start_link({global,name}, ?MODULE, [], [])
+func CallGlobal(name string, req any) any      { transpileOnly("CallGlobal"); return nil } // -> gen_server:call({global,name}, Req)
+
 // Child describes one supervised process for a supervisor's Init. Start is the
 // child's start function (e.g. echoserver.Start); it maps to the child spec MFA.
 type Child struct {

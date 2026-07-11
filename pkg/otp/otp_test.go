@@ -84,3 +84,21 @@ func TestGenServerMarkersPanic(t *testing.T) {
 		})
 	}
 }
+
+func TestStartServerGlobalPanicsNatively(t *testing.T) {
+	defer func() {
+		if r := recover(); r == nil {
+			t.Fatal("StartServerGlobal did not panic")
+		}
+	}()
+	StartServerGlobal("echo", struct{}{})
+}
+
+func TestCallGlobalPanicsNatively(t *testing.T) {
+	defer func() {
+		if r := recover(); r == nil {
+			t.Fatal("CallGlobal did not panic")
+		}
+	}()
+	CallGlobal("echo", "hi")
+}

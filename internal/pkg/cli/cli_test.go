@@ -133,6 +133,47 @@ func TestBuildOutFlagAndCollision(t *testing.T) {
 	}
 }
 
+func TestStartAssemblesDetachedErlAndWritesState(t *testing.T) {
+	// Mirror the app fixture shape from testdata/otpapp/go/echoapp/main.go.
+	// Read it before t.Chdir below, since the path is relative to the package dir.
+	appSrc, err := os.ReadFile("../../../testdata/otpapp/go/echoapp/main.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(t.TempDir())
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	dir := t.TempDir()
+	src := filepath.Join(dir, "main.go")
+	os.WriteFile(src, appSrc, 0o644)
+
+	var cmds []string
+	runErl = func(_ context.Context, _, name string, a ...string) error {
+		cmds = append(cmds, name+" "+strings.Join(a, " "))
+		return nil
+	}
+	defer func() { runErl = execRunner }()
+
+	var out strings.Builder
+	if err := Run(context.Background(), []string{"start", "--out", t.TempDir(), src},
+		strings.NewReader(""), &out, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	last := cmds[len(cmds)-1]
+	for _, want := range []string{"-detached", "-name echoapp@127.0.0.1", "-setcookie ", "application:start(echoapp)"} {
+		if !strings.Contains(last, want) {
+			t.Fatalf("erl cmd missing %q:\n%s", want, last)
+		}
+	}
+	st, err := readState("echoapp")
+	if err != nil {
+		t.Fatalf("state not written: %v", err)
+	}
+	if st.Node != "echoapp@127.0.0.1" || st.Cookie == "" {
+		t.Fatalf("bad state: %+v", st)
+	}
+}
+
 func TestParseVersionFlag(t *testing.T) {
 	tests := []struct {
 		name        string
@@ -213,6 +254,35 @@ func Start() { otp.StartServer("echo", State{}) }
 	}
 }
 
+func TestBuildAppReturnsAppModule(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "main.go")
+	os.WriteFile(src, []byte(`package echoapp
+import (
+	"go.muehmer.eu/wintermute/pkg/otp"
+
+	"go.muehmer.eu/wintermute/testdata/otpapp/go/echosup"
+)
+type App struct{}
+func (App) Start() otp.Pid { return otp.StartSupervisor(echosup.Sup{}) }
+func (App) Stop() {}
+`), 0o644)
+	out := t.TempDir()
+	appMod, modules, _, err := buildApp([]string{src}, out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if appMod != "echoapp" {
+		t.Fatalf("appMod = %q, want echoapp", appMod)
+	}
+	if len(modules) != 1 || modules[0] != "echoapp" {
+		t.Fatalf("modules = %v", modules)
+	}
+	if _, err := os.Stat(filepath.Join(out, "echoapp.erl")); err != nil {
+		t.Fatalf("echoapp.erl not written: %v", err)
+	}
+}
+
 func TestBuildSingleFileNoAppFile(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "srv.go")
@@ -230,5 +300,309 @@ func Start() { otp.StartServer("echo", nil) }
 	}
 	if entries, _ := filepath.Glob(filepath.Join(out, "*.app")); len(entries) != 0 {
 		t.Fatalf("no .app expected for a non-application build, got %v", entries)
+	}
+}
+
+func TestBuildPrintsPartialProgressBeforeError(t *testing.T) {
+	t.Chdir(t.TempDir()) // isolate: no bin/ left in the package dir
+	dir := t.TempDir()
+	out := t.TempDir()
+
+	// Create two distinct modules
+	a := filepath.Join(dir, "a.go")
+	os.WriteFile(a, []byte("package amod\nfunc Serve() {}\n"), 0o644)
+	b := filepath.Join(dir, "b.go")
+	os.WriteFile(b, []byte("package bmod\nfunc Serve() {}\n"), 0o644)
+
+	// Pre-create the second module's .erl to force a collision error
+	os.WriteFile(filepath.Join(out, "bmod.erl"), []byte("pre-existing"), 0o644)
+
+	var stdout strings.Builder
+	err := Run(context.Background(), []string{"build", "--out", out, a, b}, strings.NewReader(""), &stdout, io.Discard)
+
+	// Error must occur due to bmod.erl collision
+	if err == nil {
+		t.Fatal("expected collision error on second path")
+	}
+	if !strings.Contains(err.Error(), "already exists") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// First path must have been printed before the error
+	firstPath := outPath(out, "amod")
+	if !strings.Contains(stdout.String(), firstPath) {
+		t.Fatalf("first path should have been printed before the error\nstdout = %q\nwant substring: %q", stdout.String(), firstPath)
+	}
+}
+
+func TestParseStringFlag(t *testing.T) {
+	tests := []struct {
+		name     string
+		args     []string
+		flag     string
+		def      string
+		wantVal  string
+		wantRest []string
+		wantErr  bool
+	}{
+		{"absent", []string{"foo"}, "--name", "", "", []string{"foo"}, false},
+		{"space form", []string{"--name", "x@h"}, "--name", "", "x@h", []string{}, false},
+		{"equals form", []string{"--name=x@h"}, "--name", "", "x@h", []string{}, false},
+		{"missing value", []string{"--name"}, "--name", "", "", nil, true},
+		{"default used", []string{"main.go"}, "--name", "default@host", "default@host", []string{"main.go"}, false},
+		{"mixed args space", []string{"foo", "--name", "x@h", "bar"}, "--name", "", "x@h", []string{"foo", "bar"}, false},
+		{"mixed args equals", []string{"foo", "--name=x@h", "bar"}, "--name", "", "x@h", []string{"foo", "bar"}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			val, rest, err := parseStringFlag(tt.args, tt.flag, tt.def)
+			if tt.wantErr != (err != nil) {
+				t.Fatalf("err = %v, wantErr %v", err, tt.wantErr)
+			}
+			if tt.wantErr {
+				if !strings.Contains(err.Error(), "requires a value") {
+					t.Fatalf("err = %q, want substring 'requires a value'", err.Error())
+				}
+				return
+			}
+			if val != tt.wantVal {
+				t.Fatalf("val = %q, want %q", val, tt.wantVal)
+			}
+			if strings.Join(rest, ",") != strings.Join(tt.wantRest, ",") {
+				t.Fatalf("rest = %v, want %v", rest, tt.wantRest)
+			}
+		})
+	}
+}
+
+func TestStartNameOverride(t *testing.T) {
+	// Read app fixture before t.Chdir, since path is relative to package dir.
+	appSrc, err := os.ReadFile("../../../testdata/otpapp/go/echoapp/main.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(t.TempDir())
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	dir := t.TempDir()
+	src := filepath.Join(dir, "main.go")
+	os.WriteFile(src, appSrc, 0o644)
+
+	var cmds []string
+	runErl = func(_ context.Context, _, name string, a ...string) error {
+		cmds = append(cmds, name+" "+strings.Join(a, " "))
+		return nil
+	}
+	defer func() { runErl = execRunner }()
+
+	var out strings.Builder
+	outDir := t.TempDir()
+	if err := Run(context.Background(), []string{"start", "--name", "echo@myhost", "--out", outDir, src},
+		strings.NewReader(""), &out, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+
+	// Assert the last erl command contains the override name
+	last := cmds[len(cmds)-1]
+	if !strings.Contains(last, "-name echo@myhost") {
+		t.Fatalf("erl cmd missing '-name echo@myhost':\n%s", last)
+	}
+	// Assert it doesn't contain the default
+	if strings.Contains(last, "echoapp@127.0.0.1") {
+		t.Fatalf("erl cmd should not contain default 'echoapp@127.0.0.1':\n%s", last)
+	}
+
+	// Assert state file has the override name
+	st, err := readState("echoapp")
+	if err != nil {
+		t.Fatalf("state not written: %v", err)
+	}
+	if st.Node != "echo@myhost" {
+		t.Fatalf("state.Node = %q, want 'echo@myhost'", st.Node)
+	}
+}
+
+func TestStopAssemblesRpcAndRemovesState(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	writeState("echoapp", NodeState{Node: "echoapp@127.0.0.1", Cookie: "c0ffee", CodePath: "bin"})
+
+	var cmds []string
+	runErl = func(_ context.Context, _, name string, a ...string) error {
+		cmds = append(cmds, name+" "+strings.Join(a, " "))
+		return nil
+	}
+	defer func() { runErl = execRunner }()
+
+	var out strings.Builder
+	if err := Run(context.Background(), []string{"stop", "echoapp"},
+		strings.NewReader(""), &out, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(cmds, "\n")
+	for _, want := range []string{"-setcookie c0ffee", "rpc:call('echoapp@127.0.0.1', init, stop, [])"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("stop cmd missing %q:\n%s", want, joined)
+		}
+	}
+	if _, err := readState("echoapp"); err == nil {
+		t.Fatal("state should be removed after stop")
+	}
+}
+
+func TestStartNoAppModuleErrors(t *testing.T) {
+	t.Chdir(t.TempDir())
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	dir := t.TempDir()
+	src := filepath.Join(dir, "main.go")
+	// Create a plain package with no App type (no application module)
+	os.WriteFile(src, []byte("package plainmod\nfunc Main() {}\n"), 0o644)
+
+	runErl = func(_ context.Context, _, name string, a ...string) error {
+		return nil
+	}
+	defer func() { runErl = execRunner }()
+
+	var out strings.Builder
+	err := Run(context.Background(), []string{"start", "--out", t.TempDir(), src},
+		strings.NewReader(""), &out, io.Discard)
+
+	if err == nil {
+		t.Fatal("want error for non-application module, got nil")
+	}
+	if !strings.Contains(err.Error(), "no application module") {
+		t.Fatalf("err = %q, want substring 'no application module'", err.Error())
+	}
+}
+
+func TestStatusAssemblesPingAndReports(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	writeState("echoapp", NodeState{Node: "echoapp@127.0.0.1", Cookie: "c0ffee", CodePath: "bin"})
+
+	var gotArgs []string
+	orig := captureErl
+	captureErl = func(_ context.Context, _, _ string, a ...string) ([]byte, error) {
+		gotArgs = a
+		return []byte("pong\n"), nil
+	}
+	defer func() { captureErl = orig }()
+
+	var out strings.Builder
+	if err := Run(context.Background(), []string{"status", "echoapp"},
+		strings.NewReader(""), &out, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(gotArgs, " ")
+	if !strings.Contains(joined, "net_adm:ping('echoapp@127.0.0.1')") {
+		t.Fatalf("status cmd missing ping:\n%s", joined)
+	}
+	if !strings.Contains(out.String(), "pong") {
+		t.Fatalf("status out = %q", out.String())
+	}
+}
+
+func TestCallAssemblesGlobalGenServerCall(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	writeState("echoapp", NodeState{Node: "echoapp@127.0.0.1", Cookie: "c0ffee", CodePath: "bin"})
+
+	orig := captureErl
+	var gotArgs []string
+	captureErl = func(_ context.Context, _, _ string, a ...string) ([]byte, error) {
+		gotArgs = a
+		return []byte("hi\n"), nil
+	}
+	defer func() { captureErl = orig }()
+
+	var out strings.Builder
+	if err := Run(context.Background(), []string{"call", "echo", "hi"},
+		strings.NewReader(""), &out, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(gotArgs, " ")
+	if !strings.Contains(joined, `gen_server:call({global, echo}, <<"hi">>)`) {
+		t.Fatalf("call cmd missing global call:\n%s", joined)
+	}
+	if strings.TrimSpace(out.String()) != "hi" {
+		t.Fatalf("call out = %q", out.String())
+	}
+}
+
+func TestCallAppOverrideSelectsNamedNode(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	// Write two State-Files to force ambiguity
+	writeState("echoapp", NodeState{Node: "echoapp@127.0.0.1", Cookie: "aaa", CodePath: "bin"})
+	writeState("other", NodeState{Node: "other@127.0.0.1", Cookie: "bbb", CodePath: "bin"})
+
+	orig := captureErl
+	var gotArgs []string
+	captureErl = func(_ context.Context, _, _ string, a ...string) ([]byte, error) {
+		gotArgs = a
+		return []byte("ok\n"), nil
+	}
+	defer func() { captureErl = orig }()
+
+	var out strings.Builder
+	if err := Run(context.Background(), []string{"call", "--app", "echoapp", "echo", "hi"},
+		strings.NewReader(""), &out, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(gotArgs, " ")
+	// Verify the cookie from echoapp's state was used
+	if !strings.Contains(joined, "-setcookie aaa") {
+		t.Fatalf("call cmd should use echoapp's cookie (-setcookie aaa):\n%s", joined)
+	}
+	// Verify the gen_server call is there
+	if !strings.Contains(joined, `gen_server:call({global, echo}, <<"hi">>)`) {
+		t.Fatalf("call cmd missing global call:\n%s", joined)
+	}
+	if strings.TrimSpace(out.String()) != "ok" {
+		t.Fatalf("call out = %q", out.String())
+	}
+}
+
+func TestCallNoAppMultipleNodesErrors(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	// Write two State-Files to force ambiguity
+	writeState("echoapp", NodeState{Node: "echoapp@127.0.0.1", Cookie: "aaa", CodePath: "bin"})
+	writeState("other", NodeState{Node: "other@127.0.0.1", Cookie: "bbb", CodePath: "bin"})
+
+	var out strings.Builder
+	err := Run(context.Background(), []string{"call", "echo", "hi"},
+		strings.NewReader(""), &out, io.Discard)
+	if err == nil {
+		t.Fatal("want error for multiple nodes without --app, got nil")
+	}
+	if !strings.Contains(err.Error(), "multiple running nodes") {
+		t.Fatalf("err = %q, want substring 'multiple running nodes'", err.Error())
+	}
+}
+
+func TestAttachAssemblesRemsh(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	writeState("echoapp", NodeState{Node: "echoapp@127.0.0.1", Cookie: "c0ffee", CodePath: "bin"})
+
+	orig := attachErl
+	var gotArgs []string
+	attachErl = func(_ context.Context, _, _ string, a ...string) error {
+		gotArgs = a
+		return nil
+	}
+	defer func() { attachErl = orig }()
+
+	if err := Run(context.Background(), []string{"attach", "echoapp"},
+		strings.NewReader(""), io.Discard, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(gotArgs, " ")
+	for _, want := range []string{"-remsh echoapp@127.0.0.1", "-setcookie c0ffee"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("attach cmd missing %q:\n%s", want, joined)
+		}
 	}
 }

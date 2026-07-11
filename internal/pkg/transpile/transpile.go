@@ -488,12 +488,19 @@ func (em *emitter) emitCall(c *ast.CallExpr) (string, error) {
 		em.registered = append(em.registered, unquoteAtom(name))
 		return fmt.Sprintf("gen_server:start_link({local, %s}, ?MODULE, [], [])", unquoteAtom(name)), nil
 	}
+	if sel.Sel.Name == "StartServerGlobal" {
+		name, err := em.emitExpr(c.Args[0])
+		if err != nil {
+			return "", err
+		}
+		return fmt.Sprintf("gen_server:start_link({global, %s}, ?MODULE, [], [])", unquoteAtom(name)), nil
+	}
 	// Guard arity before indexing args below: Module only parses (no
 	// type-checking), so a wrong-arity marker call like otp.Call("x") reaches
 	// here and must yield a positioned error, not an index-out-of-range panic.
 	arity := map[string]int{
 		"Send": 2, "Register": 2, "Whereis": 1, "RegisterGlobal": 2,
-		"WhereisGlobal": 1, "Call": 2, "Self": 0, "Print": 1,
+		"WhereisGlobal": 1, "Call": 2, "CallGlobal": 2, "Self": 0, "Print": 1,
 	}
 	if n, ok := arity[sel.Sel.Name]; ok && len(c.Args) != n {
 		return "", em.errorf(c, "otp.%s expects %d argument(s), got %d", sel.Sel.Name, n, len(c.Args))
@@ -519,6 +526,8 @@ func (em *emitter) emitCall(c *ast.CallExpr) (string, error) {
 		return fmt.Sprintf("global:whereis_name(%s)", unquoteAtom(args[0])), nil
 	case "Call":
 		return fmt.Sprintf("gen_server:call(%s, %s)", unquoteAtom(args[0]), args[1]), nil
+	case "CallGlobal":
+		return fmt.Sprintf("gen_server:call({global, %s}, %s)", unquoteAtom(args[0]), args[1]), nil
 	case "Self":
 		return "self()", nil
 	case "Print":
