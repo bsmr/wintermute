@@ -23,9 +23,12 @@ concurrent, fault-tolerant Erlang/OTP idioms from idiomatic Go code.
 ## Installation
 
 ```bash
-# Coming soon
 go install go.muehmer.eu/wintermute/cmd/wm@latest
 ```
+
+Installs the `wm` binary via the `go.muehmer.eu/wintermute` vanity import path
+(resolved to the GitHub mirror). Pin a release with `@v0.2.3` instead of
+`@latest`. Package docs: <https://pkg.go.dev/go.muehmer.eu/wintermute>.
 
 ---
 
@@ -62,7 +65,10 @@ fast with the missing ones named.
 
 > ⚠️ **Early Development / Experimental**
 
-This project is in its earliest stages. Nothing works yet. Contributions, ideas, and discussions are welcome.
+Early and experimental, but functional: the echo interop subset transpiles to
+real Erlang/OTP (application → supervisor → gen_server) and runs on OTP 29.
+The Go surface is still a narrow subset. Contributions, ideas, and discussions
+are welcome.
 
 ---
 
