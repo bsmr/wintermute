@@ -4,15 +4,23 @@ Snapshot for resuming work in a fresh session. Updated 2026-07-11.
 
 ## Where things stand
 
-**0.2.3 OTP application deployment is merged to `main` (`aebbf51`) and pushed to origin.**
-It was the **fourth step of the 0.2.x line** (option A2, executed inline, 6 tasks TDD'd).
-The completed 0.2.x line is promoted to **0.3.0** after a further Copilot review + fix
+**0.2.3 OTP application deployment is released: `main` = `a1e441d`, tagged `v0.2.3`,
+fast-forward-pushed to ALL THREE remotes (`origin`, `upstream`, `github`).** It was the
+**fourth step of the 0.2.x line** (option A2, executed inline, 6 tasks TDD'd). The
+completed 0.2.x line is promoted to **0.3.0** after a further Copilot review + fix
 session. See the `release-versioning-model` memory.
 
+The gated remotes (`upstream`, `github`) had been stale at pre-0.2.0 (`bb72ef8`); this
+push caught them up with the whole 0.2.0–0.2.3 line under tag `v0.2.3`. The **Copilot
+review gate** run before the github push found and TDD-fixed two real bugs (folded into
+the release, commit `9489ca5`): non-deterministic method-map iteration (now sorted) and
+an otp-marker arity panic (now a positioned error). Fix branches
+`fix-transpile-review-{main,work}` archived on origin.
+
 **0.2.0** (hardening), **0.2.1** (distributed interop), **0.2.2** (gen_server), and
-**0.2.3** (application deployment) are all merged to `main` and pushed to origin.
-**0.1.0** remains shipped (`production-0.1.0`). Currently on `main`; no work branch open —
-the next step starts a fresh `development-0.2.4`.
+**0.2.3** (application deployment) are all on `main` and all three remotes.
+**0.1.0** remains shipped (`production-0.1.0`, tag `v0.1.0`). Currently on `main`; no work
+branch open — the next step starts a fresh `development-0.2.4`.
 
 The echo interop ladder now proves interchangeability at **four** levels — single-node
 (rungs 1–4), **distributed** (II.1–II.4), **gen_server** (III.1–III.4), and **OTP

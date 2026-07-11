@@ -1,6 +1,8 @@
 # Wintermute 0.2.3 — OTP Application deployment Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+_Status: COMPLETE — all 6 tasks shipped in v0.2.3 (`main` a1e441d); Copilot-gate fixes folded in (9489ca5)._
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** Transpile a Go `application → supervisor → gen_server` triple to Erlang/OTP and prove interchangeability with hand-written Erlang at ladder rungs IV.1–IV.4, including emission of a minimal `.app` resource file.
 
@@ -31,7 +33,7 @@
 **Interfaces:**
 - Produces: `func StartSupervisor(sup any) Pid` (transpile-only marker, panics natively); `type Child struct { ID string; Start func() }` (a plain data struct describing a supervisor child; no method bodies).
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Add to `pkg/otp/otp_test.go`:
 
@@ -55,12 +57,12 @@ func TestChildIsPlainData(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `go test ./pkg/otp/ -run 'TestStartSupervisorPanics|TestChildIsPlainData' -v`
 Expected: FAIL — `StartSupervisor` and `Child` undefined (build error).
 
-- [ ] **Step 3: Write minimal implementation**
+- [x] **Step 3: Write minimal implementation**
 
 In `pkg/otp/otp.go`, after the gen_server markers (after the `Call` line):
 
@@ -75,12 +77,12 @@ type Child struct {
 func StartSupervisor(sup any) Pid { transpileOnly("StartSupervisor"); return Pid{} } // -> Sup:start_link()
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `go test ./pkg/otp/ -v`
 Expected: PASS (all marker tests).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add pkg/otp/otp.go pkg/otp/otp_test.go
@@ -99,7 +101,7 @@ git commit -s -m "feat(otp): add StartSupervisor and Child markers"
 - Consumes: existing `emitter`, `methodNamed`, `returnExprs`, `otpPkgIdent`, `unquoteAtom`.
 - Produces: internal helpers `isSupervisorInit(fn *ast.FuncDecl) bool` and `(em *emitter) supervisorChildren(fn *ast.FuncDecl) ([]string, error)`; the behaviour dispatch in `File`/`Module` now recognizes a `Sup{ Init() []otp.Child }` type and emits `-behaviour(supervisor)` + `start_link/0` + `init/1`.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Add to `internal/pkg/transpile/transpile_test.go`:
 
@@ -132,12 +134,12 @@ func (Sup) Init() []otp.Child {
 }
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `go test ./internal/pkg/transpile/ -run TestSupervisorBehaviour -v`
 Expected: FAIL — currently the methods loop returns `type Sup has methods but no Init; not a recognized gen_server`? No — `Init` exists but returns `[]otp.Child`; the gen_server branch will try `returnExprs`/`emitExpr` on the slice literal and error. Either way: not the expected Erlang.
 
-- [ ] **Step 3: Write minimal implementation**
+- [x] **Step 3: Write minimal implementation**
 
 In `transpile.go`, restructure the `for typeName, ms := range methods` loop to dispatch on behaviour. Replace the current gen_server-only body (the block starting `initFn := methodNamed(ms, "Init")`) with:
 
@@ -243,12 +245,12 @@ func (em *emitter) supervisorChildren(fn *ast.FuncDecl) ([]string, error) {
 }
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `go test ./internal/pkg/transpile/ -run TestSupervisorBehaviour -v`
 Expected: PASS. Then `go test ./internal/pkg/transpile/` — all existing gen_server tests still PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add internal/pkg/transpile/transpile.go internal/pkg/transpile/transpile_test.go
@@ -267,7 +269,7 @@ git commit -s -m "feat(transpile): emit -behaviour(supervisor) from Init() []otp
 - Consumes: `methodNamed`, `returnExprs`, `emitExpr`, `emitCall`.
 - Produces: a behaviour branch recognizing an `App{ Start() otp.Pid; Stop() }` type → `-behaviour(application)` + `start/2` + `stop/1`; `emitCall` handles `otp.StartSupervisor(pkg.T{})` → `pkg:start_link()`.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Add to `transpile_test.go`:
 
@@ -299,12 +301,12 @@ func (App) Stop()          {}
 }
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `go test ./internal/pkg/transpile/ -run TestApplicationBehaviour -v`
 Expected: FAIL — the `App` type has `Start`/`Stop` but no `Init`, so the default branch errors `type App has methods but no Init`.
 
-- [ ] **Step 3: Write minimal implementation**
+- [x] **Step 3: Write minimal implementation**
 
 Add an application case to the behaviour switch in the methods loop, **before** the supervisor case:
 
@@ -350,12 +352,12 @@ if sel.Sel.Name == "StartSupervisor" {
 }
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `go test ./internal/pkg/transpile/ -run TestApplicationBehaviour -v`
 Expected: PASS. Then full `go test ./internal/pkg/transpile/` — all PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add internal/pkg/transpile/transpile.go internal/pkg/transpile/transpile_test.go
@@ -378,7 +380,7 @@ git commit -s -m "feat(transpile): emit -behaviour(application) from Start/Stop 
   - `func AppResource(app, vsn string, modules, registered []string) string` — the `.app` file body.
 - Consumes: everything from Tasks 2–3.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Add to `transpile_test.go`:
 
@@ -420,12 +422,12 @@ func TestAppResource(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `go test ./internal/pkg/transpile/ -run 'TestModuleReportsBehaviourAndRegistered|TestAppResource' -v`
 Expected: FAIL — `Module`, `Result`, `AppResource` undefined (build error).
 
-- [ ] **Step 3: Write minimal implementation**
+- [x] **Step 3: Write minimal implementation**
 
 Add the `registered` field to `emitter`:
 
@@ -498,12 +500,12 @@ func AppResource(app, vsn string, modules, registered []string) string {
 }
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `go test ./internal/pkg/transpile/ -v`
 Expected: PASS (new + all existing, incl. Tasks 2–3).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add internal/pkg/transpile/transpile.go internal/pkg/transpile/transpile_test.go
@@ -522,7 +524,7 @@ git commit -s -m "feat(transpile): add Module/Result, registered capture, AppRes
 - Consumes: `transpile.Module`, `transpile.AppResource`.
 - Produces: `buildCmd` accepts one or more `.go` paths; writes each `<out>/<mod>.erl`; when exactly one input has `Behaviour == "application"`, also writes `<out>/<app>.app` (vsn from `--vsn` or the `VERSION` file). New flag parser `parseVsnFlag`.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Add to `internal/pkg/cli/cli_test.go`:
 
@@ -598,12 +600,12 @@ func Start() { otp.StartServer("echo", nil) }
 
 Ensure the test file imports `bytes`, `context`, `os`, `path/filepath`, `strings`, `testing`.
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `go test ./internal/pkg/cli/ -run 'TestBuildEmitsAppFile|TestBuildSingleFileNoAppFile' -v`
 Expected: FAIL — `--vsn` unknown / multiple positional args rejected by the current `len(rest) != 1` guard.
 
-- [ ] **Step 3: Write minimal implementation**
+- [x] **Step 3: Write minimal implementation**
 
 Replace `buildCmd` in `cli.go` with a multi-file version:
 
@@ -701,12 +703,12 @@ func readVersion() (string, error) {
 }
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `go test ./internal/pkg/cli/ -v`
 Expected: PASS (new + existing cli tests).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add internal/pkg/cli/cli.go internal/pkg/cli/cli_test.go
@@ -726,7 +728,7 @@ git commit -s -m "feat(cli): multi-file wm build with .app emission"
 - Consumes: `transpile.Module`, `transpile.AppResource`, `erlang.NewLayout`, `erlang.DefaultVersion`.
 - Produces: integration tests `TestRungIV1_ErlangToErlang` … `TestRungIV4_BothWintermute`; helpers `runOtpApp(t, serverErls []string, appFile, clientErl string) string` and `transpileApp(t, dir string) (erls []string, appFile string)`.
 
-- [ ] **Step 1: Write the Go fixtures**
+- [x] **Step 1: Write the Go fixtures**
 
 `testdata/otpapp/go/echoapp/main.go`:
 
@@ -790,7 +792,7 @@ import "go.muehmer.eu/wintermute/pkg/otp"
 func Main() { otp.Print(otp.Call("echo", "hello").(string)) }
 ```
 
-- [ ] **Step 2: Write the golden Erlang fixtures**
+- [x] **Step 2: Write the golden Erlang fixtures**
 
 `testdata/otpapp/erlang/echoapp.erl`:
 
@@ -849,7 +851,7 @@ main() -> io:format("~s~n", [gen_server:call(echo, <<"hello">>)]).
   {mod, {echoapp, []}}]}.
 ```
 
-- [ ] **Step 3: Write the failing integration test**
+- [x] **Step 3: Write the failing integration test**
 
 `internal/pkg/ladder/ladder_otpapp_integration_test.go`:
 
@@ -988,7 +990,7 @@ func TestRungIV4_BothWintermute(t *testing.T) {
 
 (`transpileToErl` is reused from `ladder_integration_test.go`, same package + build tag.)
 
-- [ ] **Step 4: Run the integration test to verify it passes**
+- [x] **Step 4: Run the integration test to verify it passes**
 
 Run: `go test -tags integration ./internal/pkg/ladder/ -run 'TestRungIV' -v`
 Expected: PASS for IV.1–IV.4 (each prints `hello`). Requires local OTP at `~/.local/erlang/29.0.3`; if absent the tests Skip.
@@ -997,7 +999,7 @@ Then run the full ladder to confirm no regressions:
 Run: `go test -tags integration ./internal/pkg/ladder/ -v`
 Expected: all rungs 1–4, II.1–II.4, III.1–III.4, IV.1–IV.4 PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add testdata/otpapp internal/pkg/ladder/ladder_otpapp_integration_test.go
@@ -1008,11 +1010,11 @@ git commit -s -m "test(ladder): OTP application rungs IV.1–IV.4 on real OTP"
 
 ## Final verification gate (before merge)
 
-- [ ] `go build -o bin/wm ./cmd/wm` succeeds.
-- [ ] `go test ./...` all green (unit suite, stdlib only).
-- [ ] `go test -tags integration ./internal/pkg/ladder/` — all 16 rungs PASS on OTP 29.0.3.
-- [ ] `govulncheck ./...` and `gitleaks detect` clean; `gosec ./...` unchanged at the accepted dual-use findings.
-- [ ] Copilot review gate on the staged diff before any github-bound push.
+- [x] `go build -o bin/wm ./cmd/wm` succeeds.
+- [x] `go test ./...` all green (unit suite, stdlib only).
+- [x] `go test -tags integration ./internal/pkg/ladder/` — all 16 rungs PASS on OTP 29.0.3.
+- [x] `govulncheck ./...` and `gitleaks detect` clean; `gosec ./...` unchanged at the accepted dual-use findings.
+- [x] Copilot review gate on the staged diff before any github-bound push.
 
 ## Self-review notes
 
