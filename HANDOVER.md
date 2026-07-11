@@ -88,6 +88,10 @@ Start 0.2.4 like the prior steps: branch (`development-0.2.4-main`/`-work` from 
 - `errorf` calls `em.fset.Position` unconditionally — a white-box `emitter{}` on an error
   path would panic (safe today; add a nil-fset guard when white-box error tests appear).
 - B6 `tar --version` probe runs *after* the 64 MiB download — reorder before it.
+- **DRY (Copilot 0.2.3 review):** `parseVsnFlag`/`parseVersionFlag`/`parseOutFlag` in
+  `cli.go` are near-identical `--name X | --name=X` extractors — factor into one
+  `parseStringFlag(args, flag, default)` helper (parseVersionFlag keeps its default +
+  validation). Pure refactor, no behaviour change; deferred from the pre-push fix.
 - Cosmetics: single atom-collision test + "duplicate clause" wording; nullary-call roadmap
   message lacks a substring test; multi-line `pat` reindent assumption; size-cap error
   lacks URL context.
