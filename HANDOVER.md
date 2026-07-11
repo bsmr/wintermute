@@ -4,13 +4,14 @@ Snapshot for resuming work in a fresh session. Updated 2026-07-11.
 
 ## Where things stand
 
-**0.2.2 gen_server service model is implemented and verified; it is ready to merge to `main`.**
-It sits on branch `development-0.2.2-work` (executed inline, 9 tasks TDD'd). 0.2.2 is the
-**third step of the 0.2.x line**. The completed 0.2.x line is promoted to **0.3.0** after a
-further Copilot review + fix session. See the `release-versioning-model` memory.
+**0.2.2 gen_server service model is merged to `main` (`0e80807`) and pushed to origin.**
+It was the **third step of the 0.2.x line** (executed inline, 9 tasks TDD'd). The completed
+0.2.x line is promoted to **0.3.0** after a further Copilot review + fix session. See the
+`release-versioning-model` memory.
 
-**0.2.0** (hardening) and **0.2.1** (distributed interop, `b568cdf`) are merged to `main` and
-pushed to origin. **0.1.0** remains shipped (`production-0.1.0`).
+**0.2.0** (hardening), **0.2.1** (distributed interop), and **0.2.2** (gen_server) are all
+merged to `main` and pushed to origin. **0.1.0** remains shipped (`production-0.1.0`).
+Currently on `main`; no work branch open — the next step starts a fresh `development-0.2.3`.
 
 The echo interop ladder now proves interchangeability at three levels — single-node (rungs
 1–4, local `register`/`whereis`), **distributed** (II.1–II.4, two BEAM nodes, `global`), and
@@ -50,18 +51,19 @@ Local OTP built on this host: `~/.local/erlang/29.0.3` (OTP 29 / erts 17.0.3).
 `wm erlang install` prerequisites: `cc`/`gcc`, `make`, `m4`, `perl`, `tar` (GNU/BSD),
 plus `libncurses-dev` + `libssl-dev`. The preflight check names any that are missing.
 
-## Next step: merge 0.2.2, then start 0.2.3
+## Next step: start the 0.2.3 brainstorm
 
-1. **Finish 0.2.2** (`superpowers:finishing-a-development-branch`): squash
-   `development-0.2.2-work` → `-main` → `main`, push to origin (origin-only 0.2.x step;
-   github/upstream + Copilot gate happen at the 0.3.0 promotion of the whole 0.2.x line).
-2. **Start 0.2.3 — deployment (bring the service into a running node/cluster):** the OTP
+0.2.2 is merged; no work branch is open. The next step is the **0.2.3 brainstorm** — first
+branch (`development-0.2.3-main`/`-work` from `main`, `printf '0.2.3\n' > VERSION`), then
+`superpowers:brainstorming`, matching how 0.2.0–0.2.2 started. Then spec → plan → execute.
+
+1. **0.2.3 — deployment (bring the service into a running node/cluster):** the OTP
    operation model. Package the gen_server under a **supervisor** in an **Application**;
    `wm` deploys/starts it into a node (rather than boot-and-`init:stop`). This is where the
    dropped "main-based two-node `wm run`" idea is superseded — you deploy a service, not a
    `main()`. Cross-node gen_server (`gen_server:call({global, echo}, …)`) folds in here.
    See the `otp-execution-model-direction` memory.
-3. **Evaluate explicitly (own step): native-Erlang interop** — allow hand-written `.erl`
+2. **Evaluate explicitly (own step): native-Erlang interop** — allow hand-written `.erl`
    parts for what Go can't express but OTP needs (records, macros, guards, `.app`/releases).
    See the `native-erlang-interop-open-question` memory. Do after the deployment foundation.
 
