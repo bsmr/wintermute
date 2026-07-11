@@ -582,6 +582,159 @@ func TestCallNoAppMultipleNodesErrors(t *testing.T) {
 	}
 }
 
+func TestValidAtom(t *testing.T) {
+	tests := []struct {
+		name string
+		s    string
+		want bool
+	}{
+		{"plain atom", "echo", true},
+		{"underscored atom", "echo_server_1", true},
+		{"injection attempt", `x), os:cmd("id")`, false},
+		{"uppercase start", "Bad", false},
+		{"contains space", "has space", false},
+		{"empty", "", false},
+		{"leading digit", "1echo", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := validAtom(tt.s); got != tt.want {
+				t.Fatalf("validAtom(%q) = %v, want %v", tt.s, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestValidNodeName(t *testing.T) {
+	tests := []struct {
+		name string
+		s    string
+		want bool
+	}{
+		{"default node name", "echoapp@127.0.0.1", true},
+		{"hostname node", "myapp@myhost.example.com", true},
+		{"underscored name", "my_app_1@127.0.0.1", true},
+		{"injection attempt", `x@h'), os:cmd("id"), rpc:call('x`, false},
+		{"missing host", "echoapp@", false},
+		{"missing name", "@127.0.0.1", false},
+		{"no at sign", "echoapp", false},
+		{"contains space", "echo app@127.0.0.1", false},
+		{"empty", "", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := validNodeName(tt.s); got != tt.want {
+				t.Fatalf("validNodeName(%q) = %v, want %v", tt.s, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestCallRejectsInvalidGenServerName(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	writeState("echoapp", NodeState{Node: "echoapp@127.0.0.1", Cookie: "c0ffee", CodePath: "bin"})
+
+	orig := captureErl
+	called := false
+	captureErl = func(_ context.Context, _, _ string, a ...string) ([]byte, error) {
+		called = true
+		return []byte("should not run"), nil
+	}
+	defer func() { captureErl = orig }()
+
+	var out strings.Builder
+	err := Run(context.Background(), []string{"call", `x), os:cmd("id")`, "hi"},
+		strings.NewReader(""), &out, io.Discard)
+	if err == nil {
+		t.Fatal("want error for invalid gen_server name, got nil")
+	}
+	if !strings.Contains(err.Error(), "invalid gen_server name") {
+		t.Fatalf("err = %q, want substring 'invalid gen_server name'", err.Error())
+	}
+	if called {
+		t.Fatal("erl must not be invoked when the gen_server name fails validation")
+	}
+}
+
+func TestStartRejectsInvalidNodeName(t *testing.T) {
+	appSrc, err := os.ReadFile("../../../testdata/otpapp/go/echoapp/main.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(t.TempDir())
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	dir := t.TempDir()
+	src := filepath.Join(dir, "main.go")
+	os.WriteFile(src, appSrc, 0o644)
+
+	called := false
+	runErl = func(_ context.Context, _, name string, a ...string) error {
+		called = true
+		return nil
+	}
+	defer func() { runErl = execRunner }()
+
+	var out strings.Builder
+	err = Run(context.Background(), []string{"start", "--name", `x@h'), os:cmd("id`, "--out", t.TempDir(), src},
+		strings.NewReader(""), &out, io.Discard)
+	if err == nil {
+		t.Fatal("want error for invalid --name, got nil")
+	}
+	if !strings.Contains(err.Error(), "invalid node name") {
+		t.Fatalf("err = %q, want substring 'invalid node name'", err.Error())
+	}
+	if called {
+		t.Fatal("erl must not be invoked when --name fails validation")
+	}
+}
+
+func TestStopRejectsTraversalAppName(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	stateDir := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", stateDir)
+
+	var out strings.Builder
+	err := Run(context.Background(), []string{"stop", "../etc/passwd"},
+		strings.NewReader(""), &out, io.Discard)
+	if err == nil {
+		t.Fatal("want error for traversal app name, got nil")
+	}
+	if !strings.Contains(err.Error(), "invalid app name") {
+		t.Fatalf("err = %q, want substring 'invalid app name'", err.Error())
+	}
+}
+
+func TestStatusRejectsTraversalAppName(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+
+	var out strings.Builder
+	err := Run(context.Background(), []string{"status", "a/b"},
+		strings.NewReader(""), &out, io.Discard)
+	if err == nil {
+		t.Fatal("want error for app name containing a separator, got nil")
+	}
+	if !strings.Contains(err.Error(), "invalid app name") {
+		t.Fatalf("err = %q, want substring 'invalid app name'", err.Error())
+	}
+}
+
+func TestAttachRejectsTraversalAppName(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+
+	err := Run(context.Background(), []string{"attach", ".."},
+		strings.NewReader(""), io.Discard, io.Discard)
+	if err == nil {
+		t.Fatal("want error for '..' app name, got nil")
+	}
+	if !strings.Contains(err.Error(), "invalid app name") {
+		t.Fatalf("err = %q, want substring 'invalid app name'", err.Error())
+	}
+}
+
 func TestAttachAssemblesRemsh(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("XDG_STATE_HOME", t.TempDir())

@@ -8,11 +8,26 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"go.muehmer.eu/wintermute/internal/pkg/erlang"
 	"go.muehmer.eu/wintermute/internal/pkg/transpile"
 )
+
+// atomRE and nodeRE are compiled once and reused by validAtom/validNodeName.
+var (
+	atomRE = regexp.MustCompile(`^[a-z][a-zA-Z0-9_]*$`)
+	nodeRE = regexp.MustCompile(`^[a-zA-Z0-9_]+@[A-Za-z0-9_.-]+$`)
+)
+
+// validAtom reports whether s is a plain lowercase Erlang atom, safe to splice
+// unquoted into an `erl -eval` string (e.g. a gen_server registered name).
+func validAtom(s string) bool { return atomRE.MatchString(s) }
+
+// validNodeName reports whether s is a safe Erlang node name (name@host),
+// safe to splice unquoted (inside single quotes) into an `erl -eval` string.
+func validNodeName(s string) bool { return nodeRE.MatchString(s) }
 
 // commands lists the subcommands wm will support. build and erlang are real;
 // the rest are stubs for now.
@@ -258,6 +273,12 @@ func startCmd(ctx context.Context, args []string, stdout io.Writer) error {
 	if err != nil {
 		return err
 	}
+	// Validate an explicit --name override up front, before any transpile/erlc
+	// work runs: the value later gets spliced unquoted into stop/status/attach
+	// `erl -eval` strings, so a crafted override must never reach that far.
+	if name != "" && !validNodeName(name) {
+		return fmt.Errorf("invalid node name %q (must match name@host)", name)
+	}
 	version, rest, err := parseVersionFlag(rest)
 	if err != nil {
 		return err
@@ -312,6 +333,12 @@ func startCmd(ctx context.Context, args []string, stdout io.Writer) error {
 	if name == "" {
 		name = appMod + "@127.0.0.1"
 	}
+	// Validate whether the name came from --name or the default: it later gets
+	// spliced unquoted into stop/status/attach `erl -eval` strings, so the
+	// invariant must hold regardless of where the value originated.
+	if !validNodeName(name) {
+		return fmt.Errorf("invalid node name %q (must match name@host)", name)
+	}
 	cookie, err := newCookie()
 	if err != nil {
 		return err
@@ -353,6 +380,9 @@ func parseStringFlag(args []string, flag, def string) (string, []string, error) 
 // sole running app if none is given.
 func resolveApp(args []string) (string, []string, error) {
 	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
+		if !validAppName(args[0]) {
+			return "", nil, fmt.Errorf("invalid app name %q", args[0])
+		}
 		return args[0], args[1:], nil
 	}
 	dir, err := stateDir()
@@ -456,6 +486,9 @@ func callCmd(ctx context.Context, args []string, stdout io.Writer) error {
 		return fmt.Errorf("usage: wm call <name> <request> [--app APP]")
 	}
 	name, req := rest[0], rest[1]
+	if !validAtom(name) {
+		return fmt.Errorf("invalid gen_server name %q (must be a lowercase atom)", name)
+	}
 	if app == "" {
 		app, _, err = resolveApp(nil)
 		if err != nil {
