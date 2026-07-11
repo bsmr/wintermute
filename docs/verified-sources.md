@@ -30,6 +30,15 @@ and ships symlinks. `tar` rejects absolute/`..` members; the source is trusted
 and pinned. Cryptographic verification of the `.sigstore` signature before build
 is a future enhancement (not stdlib-trivial) — track it when useful.
 
+**SHA-256 pin (Task 12 / B2):** the downloaded tarball is now verified against
+a pinned SHA-256 (stdlib `crypto/sha256`, no sigstore/third-party) before
+extraction — `Provision` aborts with a checksum-mismatch error instead of
+extracting unverified bytes.
+
+| Item | Version | SHA-256 | Verified | Notes |
+|---|---|---|---|---|
+| Erlang/OTP source tarball | 29.0.3 | `f920c660b16794bcb7270d1cbf680f7747c719650bcd6ac449508a32c2a8972a` | 2026-07-11 | pinned in `internal/pkg/erlang/source.go` (`sourceSHA256`); checked in `fetchSource` before every `Provision` build |
+
 ## Installed toolchain (this machine)
 
 Security/dev tools installed via `go install` (in `$(go env GOPATH)/bin`) or the

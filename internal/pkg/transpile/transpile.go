@@ -18,14 +18,17 @@ import (
 // as tagged tuples in the correct order.
 type emitter struct {
 	structs map[string][]string
+	fset    *token.FileSet
 }
 
-// File parses Go source and emits an Erlang module string.
-func File(src string) (string, error) {
+// File parses Go source and emits an Erlang module string, along with the
+// module name (the Go package name) so callers don't need to re-parse the
+// emitted header to recover it.
+func File(src string) (string, string, error) {
 	fset := token.NewFileSet()
 	f, err := parser.ParseFile(fset, "src.go", src, 0)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 
 	structs := map[string][]string{}
@@ -46,31 +49,41 @@ func File(src string) (string, error) {
 			var fields []string
 			for _, fld := range st.Fields.List {
 				for _, n := range fld.Names {
+					if !token.IsExported(n.Name) {
+						return "", "", fmt.Errorf("struct %s field %s is lowercase-leading; Erlang variables must be uppercase",
+							ts.Name.Name, n.Name)
+					}
 					fields = append(fields, n.Name)
 				}
 			}
 			structs[ts.Name.Name] = fields
 		}
 	}
-	em := &emitter{structs: structs}
+	em := &emitter{structs: structs, fset: fset}
 
 	var exports []string
 	var bodies strings.Builder
+	seen := map[string]string{}
 	for _, d := range f.Decls {
 		fn, ok := d.(*ast.FuncDecl)
 		if !ok || fn.Recv != nil {
 			continue
 		}
 		if fn.Type.Params != nil && len(fn.Type.Params.List) != 0 {
-			return "", fmt.Errorf("unsupported function %s: parameters not supported in 0.1.0", fn.Name.Name)
+			return "", "", fmt.Errorf("unsupported function %s: parameters are not yet supported (echo subset); see the 0.2.x roadmap", fn.Name.Name)
 		}
 		name := strings.ToLower(fn.Name.Name)
+		if prev, ok := seen[name]; ok {
+			return "", "", fmt.Errorf("functions %s and %s both map to Erlang atom %s (duplicate clause); rename one",
+				prev, fn.Name.Name, name)
+		}
+		seen[name] = fn.Name.Name
 		if fn.Name.IsExported() {
 			exports = append(exports, name+"/0")
 		}
 		stmts, err := em.emitBody(fn.Body)
 		if err != nil {
-			return "", err
+			return "", "", err
 		}
 		// A single-statement body that emits on one line gets a one-line
 		// clause (e.g. `start() -> register(...).`). An empty body (which
@@ -86,7 +99,7 @@ func File(src string) (string, error) {
 	fmt.Fprintf(&b, "-module(%s).\n", f.Name.Name)
 	fmt.Fprintf(&b, "-export([%s]).\n", strings.Join(exports, ", "))
 	b.WriteString(bodies.String())
-	return b.String(), nil
+	return b.String(), f.Name.Name, nil
 }
 
 // emitBody returns the Erlang expression sequence for a function body.
@@ -114,8 +127,8 @@ func (em *emitter) emitBody(body *ast.BlockStmt) (string, error) {
 		if err != nil {
 			return "", err
 		}
-		clauseBody := strings.ReplaceAll(inner, "\n", "\n        ")
-		recv := "receive\n    " + pat + " ->\n        " + clauseBody + "\nend"
+		clauseBody := indent(indent(inner)) // two 4-space levels = the receive clause body
+		recv := "receive\n" + indent(pat+" ->") + "\n" + clauseBody + "\nend"
 		if pre == "" {
 			return recv, nil
 		}
@@ -184,8 +197,13 @@ func isOtpCall(c *ast.CallExpr, name string) bool {
 	if !ok {
 		return false
 	}
-	id, ok := sel.X.(*ast.Ident)
-	return ok && id.Name == "otp" && sel.Sel.Name == name
+	return otpPkgIdent(sel.X) && sel.Sel.Name == name
+}
+
+// otpPkgIdent reports whether x is the bare package identifier `otp`.
+func otpPkgIdent(x ast.Expr) bool {
+	id, ok := x.(*ast.Ident)
+	return ok && id.Name == "otp"
 }
 
 func (em *emitter) emitStmt(s ast.Stmt) (string, error) {
@@ -193,7 +211,7 @@ func (em *emitter) emitStmt(s ast.Stmt) (string, error) {
 	case *ast.ExprStmt:
 		return em.emitExpr(st.X)
 	default:
-		return "", fmt.Errorf("unsupported statement: %T", s)
+		return "", em.errorf(s, "unsupported statement: %T", s)
 	}
 }
 
@@ -203,20 +221,20 @@ func (em *emitter) emitExpr(e ast.Expr) (string, error) {
 		if ex.Kind == token.STRING {
 			return "<<" + ex.Value + ">>", nil // ex.Value keeps the quotes
 		}
-		return "", fmt.Errorf("unsupported literal: %s", ex.Value)
+		return "", em.errorf(ex, "unsupported literal: %s", ex.Value)
 	case *ast.CallExpr:
 		return em.emitCall(ex)
 	case *ast.CompositeLit:
 		typ, ok := ex.Type.(*ast.Ident)
 		if !ok {
-			return "", fmt.Errorf("unsupported composite literal")
+			return "", em.errorf(ex, "unsupported composite literal")
 		}
 		order := em.structs[typ.Name]
 		byField := map[string]string{}
 		for _, elt := range ex.Elts {
 			kv, ok := elt.(*ast.KeyValueExpr)
 			if !ok {
-				return "", fmt.Errorf("struct literal needs field: value")
+				return "", em.errorf(ex, "struct literal needs field: value")
 			}
 			key := kv.Key.(*ast.Ident).Name
 			v, err := em.emitExpr(kv.Value)
@@ -229,7 +247,7 @@ func (em *emitter) emitExpr(e ast.Expr) (string, error) {
 		for _, fn := range order {
 			v, ok := byField[fn]
 			if !ok {
-				return "", fmt.Errorf("struct literal for %s omits field %s", typ.Name, fn)
+				return "", em.errorf(ex, "struct literal for %s omits field %s", typ.Name, fn)
 			}
 			parts = append(parts, v)
 		}
@@ -239,9 +257,18 @@ func (em *emitter) emitExpr(e ast.Expr) (string, error) {
 		if _, ok := ex.X.(*ast.Ident); ok {
 			return ex.Sel.Name, nil // field name is already Erlang-variable-cased (From, Text)
 		}
-		return "", fmt.Errorf("unsupported selector")
+		return "", em.errorf(ex, "unsupported selector")
+	case *ast.Ident:
+		// A pre-bound variable reference (e.g. From/Text bound in a receive
+		// pattern) must be an uppercase-leading Erlang variable. A lowercase
+		// ident would emit an Erlang atom, not a variable — silently wrong —
+		// so reject it, consistent with the A2 field-casing guard.
+		if !token.IsExported(ex.Name) {
+			return "", em.errorf(ex, "bare identifier %s is lowercase-leading; Erlang variables must be uppercase", ex.Name)
+		}
+		return ex.Name, nil
 	default:
-		return "", fmt.Errorf("unsupported expression: %T", e)
+		return "", em.errorf(e, "unsupported expression: %T", e)
 	}
 }
 
@@ -249,17 +276,16 @@ func (em *emitter) emitCall(c *ast.CallExpr) (string, error) {
 	// bare self-call: Serve()
 	if id, ok := c.Fun.(*ast.Ident); ok {
 		if len(c.Args) != 0 {
-			return "", fmt.Errorf("unsupported call with arguments: %s", id.Name)
+			return "", em.errorf(c, "unsupported call %s with arguments: only nullary self-calls are in the subset (see the 0.2.x roadmap)", id.Name)
 		}
 		return strings.ToLower(id.Name) + "()", nil
 	}
 	sel, ok := c.Fun.(*ast.SelectorExpr)
 	if !ok {
-		return "", fmt.Errorf("unsupported call target: %T", c.Fun)
+		return "", em.errorf(c, "unsupported call target: %T", c.Fun)
 	}
-	pkg, _ := sel.X.(*ast.Ident)
-	if pkg == nil || pkg.Name != "otp" {
-		return "", fmt.Errorf("unsupported call: %s", sel.Sel.Name)
+	if !otpPkgIdent(sel.X) {
+		return "", em.errorf(c, "unsupported call: %s", sel.Sel.Name)
 	}
 	// otp.Spawn takes a bare function identifier, not an expression, so it
 	// is handled before the general arg-emission loop below (emitExpr has
@@ -267,7 +293,7 @@ func (em *emitter) emitCall(c *ast.CallExpr) (string, error) {
 	if sel.Sel.Name == "Spawn" {
 		id, ok := c.Args[0].(*ast.Ident)
 		if !ok {
-			return "", fmt.Errorf("otp.Spawn requires a function identifier argument")
+			return "", em.errorf(c, "otp.Spawn requires a function identifier argument")
 		}
 		return fmt.Sprintf("spawn(fun ?MODULE:%s/0)", strings.ToLower(id.Name)), nil
 	}
@@ -291,8 +317,13 @@ func (em *emitter) emitCall(c *ast.CallExpr) (string, error) {
 	case "Print":
 		return fmt.Sprintf("io:format(\"~s~n\", [%s])", args[0]), nil
 	default:
-		return "", fmt.Errorf("unsupported otp call: %s", sel.Sel.Name)
+		return "", em.errorf(c, "unsupported otp call: %s", sel.Sel.Name)
 	}
+}
+
+// errorf formats an error prefixed with n's source position (src.go:line:col).
+func (em *emitter) errorf(n ast.Node, format string, a ...any) error {
+	return fmt.Errorf("%s: %s", em.fset.Position(n.Pos()), fmt.Sprintf(format, a...))
 }
 
 // unquoteAtom turns <<"echo">> back into the bare atom echo (for register/whereis names).

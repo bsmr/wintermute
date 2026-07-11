@@ -60,74 +60,133 @@ func usage(w io.Writer) {
 }
 
 // buildCmd transpiles the Go source file at args[0] to Erlang and writes it
-// to bin/<module>.erl, printing the output path to stdout.
+// to <out>/<module>.erl (out defaults to bin, overridable via --out),
+// printing the output path to stdout. Refuses to overwrite an existing
+// output file.
 func buildCmd(args []string, stdout io.Writer) error {
-	if len(args) != 1 {
-		return fmt.Errorf("usage: wm build <path>")
-	}
-	src, err := os.ReadFile(args[0])
+	out, rest, err := parseOutFlag(args)
 	if err != nil {
 		return err
 	}
-	erl, err := transpile.File(string(src))
+	if len(rest) != 1 {
+		return fmt.Errorf("usage: wm build <path> [--out DIR]")
+	}
+	src, err := os.ReadFile(rest[0])
 	if err != nil {
 		return err
 	}
-	mod := moduleName(erl)
-	if err := os.MkdirAll("bin", 0o755); err != nil {
+	erl, mod, err := transpile.File(string(src))
+	if err != nil {
 		return err
 	}
-	outPath := filepath.Join("bin", mod+".erl")
-	if err := os.WriteFile(outPath, []byte(erl), 0o644); err != nil {
+	dst := outPath(out, mod)
+	if _, err := os.Stat(dst); err == nil {
+		return fmt.Errorf("%s already exists (refusing to overwrite; use --out or remove it)", dst)
+	}
+	if err := os.MkdirAll(out, 0o755); err != nil {
 		return err
 	}
-	fmt.Fprintln(stdout, outPath)
+	if err := os.WriteFile(dst, []byte(erl), 0o644); err != nil {
+		return err
+	}
+	fmt.Fprintln(stdout, dst)
 	return nil
 }
 
 // runCmd transpiles the Go source file at args[0] to Erlang, writes it to
-// bin/<module>.erl, compiles it with the version's erlc, and boots it with
-// erl, invoking <module>:main().
+// <out>/<module>.erl (out defaults to bin, overridable via --out), compiles
+// it with the version's erlc, and boots it with erl, invoking
+// <module>:main(). Unlike buildCmd, runCmd has no collision guard: run is an
+// ephemeral compile-and-execute step that must be repeatable, so it always
+// overwrites its output.
 func runCmd(ctx context.Context, args []string, stdout io.Writer) error {
-	if len(args) < 1 {
-		return fmt.Errorf("usage: wm run <path> [--version X]")
-	}
-	version := erlang.DefaultVersion
-	if len(args) == 3 && args[1] == "--version" {
-		version = args[2]
-	}
-	src, err := os.ReadFile(args[0])
+	version, rest, err := parseVersionFlag(args)
 	if err != nil {
 		return err
 	}
-	erl, err := transpile.File(string(src))
+	if err := erlang.ValidateVersion(version); err != nil {
+		return err
+	}
+	out, rest, err := parseOutFlag(rest)
 	if err != nil {
 		return err
 	}
-	mod := moduleName(erl)
-	if err := os.MkdirAll("bin", 0o755); err != nil {
+	if len(rest) != 1 {
+		return fmt.Errorf("usage: wm run <path> [--version X] [--out DIR]")
+	}
+	srcPath := rest[0]
+	src, err := os.ReadFile(srcPath)
+	if err != nil {
 		return err
 	}
-	if err := os.WriteFile(filepath.Join("bin", mod+".erl"), []byte(erl), 0o644); err != nil {
+	erl, mod, err := transpile.File(string(src))
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(stdout, "booting %s\n", mod)
+	if err := os.MkdirAll(out, 0o755); err != nil {
+		return err
+	}
+	dst := outPath(out, mod)
+	if err := os.WriteFile(dst, []byte(erl), 0o644); err != nil {
 		return err
 	}
 	home, _ := os.UserHomeDir()
 	l := erlang.NewLayout(home, version)
-	if err := runErl(ctx, ".", l.Erlc(), "-o", "bin", filepath.Join("bin", mod+".erl")); err != nil {
+	if err := runErl(ctx, ".", l.Erlc(), "-o", out, dst); err != nil {
 		return err
 	}
 	eval := mod + ":main(), init:stop()."
-	return runErl(ctx, ".", l.Erl(), "-noshell", "-pa", "bin", "-eval", eval)
+	return runErl(ctx, ".", l.Erl(), "-noshell", "-pa", out, "-eval", eval)
 }
 
-// moduleName extracts the name from "-module(name)." on the first line.
-func moduleName(erl string) string {
-	first := erl
-	if i := strings.IndexByte(erl, '\n'); i >= 0 {
-		first = erl[:i]
+// parseVersionFlag pulls an optional --version flag (--version X or
+// --version=X) out of args, returning the resolved version (DefaultVersion if
+// absent), the remaining positional args, and an error on a malformed flag.
+func parseVersionFlag(args []string) (string, []string, error) {
+	version := erlang.DefaultVersion
+	var rest []string
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		switch {
+		case a == "--version":
+			if i+1 >= len(args) {
+				return "", nil, fmt.Errorf("--version requires a value")
+			}
+			version = args[i+1]
+			i++
+		case strings.HasPrefix(a, "--version="):
+			version = strings.TrimPrefix(a, "--version=")
+		default:
+			rest = append(rest, a)
+		}
 	}
-	first = strings.TrimPrefix(first, "-module(")
-	return strings.TrimSuffix(first, ").")
+	return version, rest, nil
+}
+
+// parseOutFlag pulls an optional --out DIR out of args (default "bin").
+func parseOutFlag(args []string) (out string, rest []string, err error) {
+	out = "bin"
+	for i := 0; i < len(args); i++ {
+		switch a := args[i]; {
+		case a == "--out":
+			if i+1 >= len(args) {
+				return "", nil, fmt.Errorf("--out requires a directory")
+			}
+			out = args[i+1]
+			i++
+		case strings.HasPrefix(a, "--out="):
+			out = strings.TrimPrefix(a, "--out=")
+		default:
+			rest = append(rest, a)
+		}
+	}
+	return out, rest, nil
+}
+
+// outPath resolves the output .erl path for a module in the given directory.
+func outPath(dir, mod string) string {
+	return filepath.Join(dir, mod+".erl")
 }
 
 // erlangCmd manages local Erlang/OTP toolchains under ~/.local/erlang/.
@@ -150,9 +209,15 @@ func erlangCmd(ctx context.Context, args []string, stdout io.Writer) error {
 		}
 		return nil
 	case "install":
-		version := erlang.DefaultVersion
-		if len(args) == 3 && args[1] == "--version" {
-			version = args[2]
+		version, rest, err := parseVersionFlag(args[1:])
+		if err != nil {
+			return err
+		}
+		if err := erlang.ValidateVersion(version); err != nil {
+			return err
+		}
+		if len(rest) != 0 {
+			return fmt.Errorf("usage: wm erlang install [--version X]")
 		}
 		b := erlang.Builder{Home: home, Out: stdout, Run: execRunner}
 		return b.Provision(ctx, version)

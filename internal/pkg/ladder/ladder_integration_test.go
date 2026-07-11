@@ -55,23 +55,15 @@ func transpileToErl(t *testing.T, goPath, dir string) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	erl, err := transpile.File(string(src))
+	erl, mod, err := transpile.File(string(src))
 	if err != nil {
 		t.Fatal(err)
 	}
-	mod := moduleNameFromErl(erl)
 	out := filepath.Join(dir, mod+".erl")
 	if err := os.WriteFile(out, []byte(erl), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	return out
-}
-
-// moduleNameFromErl extracts the module name from an Erlang source's
-// leading `-module(name).` line.
-func moduleNameFromErl(erl string) string {
-	first := strings.SplitN(erl, "\n", 2)[0]
-	return strings.TrimSuffix(strings.TrimPrefix(first, "-module("), ").")
 }
 
 func TestRung2_WintermuteClient(t *testing.T) {

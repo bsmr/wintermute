@@ -1,6 +1,7 @@
 package transpile
 
 import (
+	"go/ast"
 	"os"
 	"strings"
 	"testing"
@@ -10,7 +11,7 @@ func TestFile_ModuleAndExport(t *testing.T) {
 	src := `package echoserver
 func Serve() {}
 `
-	got, err := File(src)
+	got, _, err := File(src)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -28,7 +29,7 @@ func Main() {
 	otp.Print("done")
 }
 `
-	got, err := File(src)
+	got, _, err := File(src)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -49,7 +50,7 @@ func Main() {
 	otp.Send(otp.Whereis("echo"), Echo{From: otp.Self(), Text: "hello"})
 }
 `
-	got, err := File(src)
+	got, _, err := File(src)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -63,7 +64,7 @@ func TestFile_SpawnNonIdentErrors(t *testing.T) {
 import "go.muehmer.eu/wintermute/pkg/otp"
 func Boot() { otp.Spawn(makeFn()) }
 `
-	_, err := File(src)
+	_, _, err := File(src)
 	if err == nil {
 		t.Fatal("want error for non-identifier otp.Spawn argument, got nil")
 	}
@@ -80,7 +81,7 @@ func Serve() {
 	Serve()
 }
 `
-	got, err := File(src)
+	got, _, err := File(src)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -100,7 +101,7 @@ func TestFile_GoldenServer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, err := File(string(src))
+	got, _, err := File(string(src))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -124,7 +125,7 @@ func Main() {
 	otp.Send(otp.Whereis("echo"), Echo{From: otp.Self()})
 }
 `
-	_, err := File(src)
+	_, _, err := File(src)
 	if err == nil {
 		t.Fatal("want error for struct literal omitting a declared field, got nil")
 	}
@@ -134,7 +135,7 @@ func TestFile_NullaryCallWithArgsErrors(t *testing.T) {
 	src := `package m
 func Boot() { Helper("x") }
 `
-	_, err := File(src)
+	_, _, err := File(src)
 	if err == nil {
 		t.Fatal("want error for bare-identifier call with arguments, got nil")
 	}
@@ -144,8 +145,86 @@ func TestFile_FunctionWithParamsErrors(t *testing.T) {
 	src := `package m
 func Boot(x string) {}
 `
-	_, err := File(src)
+	_, _, err := File(src)
 	if err == nil {
 		t.Fatal("want error for function with parameters, got nil")
+	}
+	if !strings.Contains(err.Error(), "0.2.x roadmap") {
+		t.Fatalf("error should point at the roadmap, got: %v", err)
+	}
+}
+
+func TestFile_AtomCollisionErrors(t *testing.T) {
+	src := `package m
+func Foo() {}
+func foo() {}
+`
+	_, _, err := File(src)
+	if err == nil {
+		t.Fatal("want error for Foo/foo collapsing to the same Erlang atom, got nil")
+	}
+	if !strings.Contains(err.Error(), "foo") {
+		t.Fatalf("error should name the colliding atom, got: %v", err)
+	}
+}
+
+func TestFile_LowercaseFieldErrors(t *testing.T) {
+	src := `package m
+type Msg struct { text string }
+func Serve() { m := otp.Receive().(Msg); otp.Print(m.text) }
+`
+	_, _, err := File(src)
+	if err == nil {
+		t.Fatal("want error for lowercase-leading struct field (invalid Erlang variable), got nil")
+	}
+	if !strings.Contains(err.Error(), "text") {
+		t.Fatalf("error should name the offending field, got: %v", err)
+	}
+}
+
+func TestEmitExpr_BareIdent(t *testing.T) {
+	em := &emitter{}
+	got, err := em.emitExpr(&ast.Ident{Name: "From"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "From" {
+		t.Fatalf("emitExpr(ident From) = %q, want %q", got, "From")
+	}
+}
+
+func TestFile_LowercaseBareIdentErrors(t *testing.T) {
+	src := `package m
+func Boot() { otp.Print(x) }
+`
+	_, _, err := File(src)
+	if err == nil {
+		t.Fatal("want error for lowercase-leading bare identifier, got nil")
+	}
+	if !strings.Contains(err.Error(), "x") {
+		t.Fatalf("error should name the identifier, got: %v", err)
+	}
+}
+
+func TestFile_ErrorsCarryPosition(t *testing.T) {
+	src := `package m
+func Boot() { 1 + 2 }
+`
+	_, _, err := File(src)
+	if err == nil {
+		t.Fatal("want error for unsupported binary expression, got nil")
+	}
+	if !strings.Contains(err.Error(), "src.go:2") {
+		t.Fatalf("error should carry a src.go:line position, got: %v", err)
+	}
+}
+
+func TestFile_ReturnsModuleName(t *testing.T) {
+	_, mod, err := File("package echoserver\nfunc Serve() {}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mod != "echoserver" {
+		t.Fatalf("module = %q, want echoserver", mod)
 	}
 }

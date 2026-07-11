@@ -8,8 +8,13 @@ import (
 func (l Layout) Erlc() string { return filepath.Join(l.Bin, "erlc") }
 func (l Layout) Erl() string  { return filepath.Join(l.Bin, "erl") }
 
-// Installed reports whether erl exists in this layout's bin.
+// Installed reports whether both erl and erlc exist in this layout's bin.
 func (l Layout) Installed() bool {
-	info, err := os.Stat(l.Erl())
-	return err == nil && !info.IsDir()
+	for _, p := range []string{l.Erl(), l.Erlc()} {
+		info, err := os.Stat(p)
+		if err != nil || info.IsDir() {
+			return false
+		}
+	}
+	return true
 }

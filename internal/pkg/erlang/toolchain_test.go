@@ -18,8 +18,14 @@ func TestInstalled(t *testing.T) {
 	if err := os.WriteFile(l.Erl(), []byte("#!/bin/sh\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	if l.Installed() {
+		t.Fatal("should not be installed with erl but no erlc")
+	}
+	if err := os.WriteFile(l.Erlc(), []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	if !l.Installed() {
-		t.Fatal("should be installed after writing erl")
+		t.Fatal("should be installed with both erl and erlc")
 	}
 	if l.Erlc() != filepath.Join(l.Bin, "erlc") {
 		t.Fatalf("Erlc = %q", l.Erlc())

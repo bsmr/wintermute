@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"go.muehmer.eu/wintermute/internal/pkg/erlang"
 )
 
 func TestRun(t *testing.T) {
@@ -43,6 +45,7 @@ func TestErlangList(t *testing.T) {
 	home := t.TempDir()
 	os.MkdirAll(filepath.Join(home, ".local", "erlang", "29.0.3", "bin"), 0o755)
 	os.WriteFile(filepath.Join(home, ".local", "erlang", "29.0.3", "bin", "erl"), []byte("x"), 0o755)
+	os.WriteFile(filepath.Join(home, ".local", "erlang", "29.0.3", "bin", "erlc"), []byte("x"), 0o755)
 	t.Setenv("HOME", home)
 	var out strings.Builder
 	err := Run(context.Background(), []string{"erlang", "list"}, strings.NewReader(""), &out, io.Discard)
@@ -55,6 +58,7 @@ func TestErlangList(t *testing.T) {
 }
 
 func TestRunAssemblesErlcAndErl(t *testing.T) {
+	t.Chdir(t.TempDir()) // isolate: no bin/ left in the package dir
 	dir := t.TempDir()
 	src := filepath.Join(dir, "main.go")
 	os.WriteFile(src, []byte("package m\nfunc Main() { }\n"), 0o644)
@@ -72,10 +76,24 @@ func TestRunAssemblesErlcAndErl(t *testing.T) {
 	if len(cmds) != 2 || !strings.Contains(cmds[0], "erlc") || !strings.Contains(cmds[1], "m:main()") {
 		t.Fatalf("cmds = %v", cmds)
 	}
-	os.Remove(filepath.Join("bin", "m.erl"))
+	if !strings.Contains(out.String(), "booting m") {
+		t.Fatalf("stdout = %q, want 'booting m'", out.String())
+	}
+}
+
+func TestRunRejectsTraversalVersion(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "main.go")
+	os.WriteFile(src, []byte("package m\nfunc Main() {}\n"), 0o644)
+	t.Setenv("HOME", t.TempDir())
+	err := Run(context.Background(), []string{"run", src, "--version", "../../etc"}, strings.NewReader(""), io.Discard, io.Discard)
+	if err == nil {
+		t.Fatal("want error for traversal --version, got nil")
+	}
 }
 
 func TestBuildCommand(t *testing.T) {
+	t.Chdir(t.TempDir()) // isolate: no bin/ left in the package dir
 	dir := t.TempDir()
 	src := filepath.Join(dir, "main.go")
 	os.WriteFile(src, []byte("package m\nfunc Serve() {}\n"), 0o644)
@@ -92,5 +110,56 @@ func TestBuildCommand(t *testing.T) {
 	if !strings.Contains(string(b), "-module(m).") {
 		t.Fatalf("bad erl:\n%s", b)
 	}
-	os.Remove(erl)
+}
+
+func TestBuildOutFlagAndCollision(t *testing.T) {
+	t.Chdir(t.TempDir()) // isolate: no bin/ left in the package dir
+	dir := t.TempDir()
+	src := filepath.Join(dir, "main.go")
+	os.WriteFile(src, []byte("package m\nfunc Serve() {}\n"), 0o644)
+	out := t.TempDir()
+
+	// --out writes into the chosen dir
+	if err := Run(context.Background(), []string{"build", src, "--out", out}, strings.NewReader(""), io.Discard, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(out, "m.erl")); err != nil {
+		t.Fatalf("expected m.erl in --out dir: %v", err)
+	}
+	// second build to the same dir collides
+	if err := Run(context.Background(), []string{"build", src, "--out", out}, strings.NewReader(""), io.Discard, io.Discard); err == nil {
+		t.Fatal("want collision error on second build to same out, got nil")
+	}
+}
+
+func TestParseVersionFlag(t *testing.T) {
+	tests := []struct {
+		name        string
+		args        []string
+		wantVersion string
+		wantRest    []string
+		wantErr     bool
+	}{
+		{"absent", []string{"main.go"}, erlang.DefaultVersion, []string{"main.go"}, false},
+		{"space form", []string{"main.go", "--version", "29.0.3"}, "29.0.3", []string{"main.go"}, false},
+		{"equals form", []string{"--version=29.0.3", "main.go"}, "29.0.3", []string{"main.go"}, false},
+		{"missing value", []string{"main.go", "--version"}, "", nil, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			v, rest, err := parseVersionFlag(tt.args)
+			if tt.wantErr != (err != nil) {
+				t.Fatalf("err = %v, wantErr %v", err, tt.wantErr)
+			}
+			if tt.wantErr {
+				return
+			}
+			if v != tt.wantVersion {
+				t.Fatalf("version = %q, want %q", v, tt.wantVersion)
+			}
+			if strings.Join(rest, ",") != strings.Join(tt.wantRest, ",") {
+				t.Fatalf("rest = %v, want %v", rest, tt.wantRest)
+			}
+		})
+	}
 }
