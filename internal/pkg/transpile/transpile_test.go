@@ -441,3 +441,92 @@ func TestFile_GoldenGenServerClient(t *testing.T) {
 		t.Fatalf("got:\n%s", got)
 	}
 }
+
+func TestSupervisorBehaviour(t *testing.T) {
+	src := `package echosup
+import "go.muehmer.eu/wintermute/pkg/otp"
+import "example/echoserver"
+type Sup struct{}
+func (Sup) Init() []otp.Child {
+	return []otp.Child{{ID: "echo", Start: echoserver.Start}}
+}
+`
+	erl, mod, err := File(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mod != "echosup" {
+		t.Fatalf("mod = %q, want echosup", mod)
+	}
+	for _, want := range []string{
+		"-behaviour(supervisor).",
+		"start_link() -> supervisor:start_link({local, echosup}, ?MODULE, []).",
+		"init(_) -> {ok, {{one_for_one, 1, 5}, [{echo, {echoserver, start, []}, permanent, 5000, worker, [echoserver]}]}}.",
+	} {
+		if !strings.Contains(erl, want) {
+			t.Fatalf("missing %q in:\n%s", want, erl)
+		}
+	}
+}
+
+func TestApplicationBehaviour(t *testing.T) {
+	src := `package echoapp
+import "go.muehmer.eu/wintermute/pkg/otp"
+import "example/echosup"
+type App struct{}
+func (App) Start() otp.Pid { return otp.StartSupervisor(echosup.Sup{}) }
+func (App) Stop()          {}
+`
+	erl, mod, err := File(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mod != "echoapp" {
+		t.Fatalf("mod = %q, want echoapp", mod)
+	}
+	for _, want := range []string{
+		"-behaviour(application).",
+		"start(_Type, _Args) -> echosup:start_link().",
+		"stop(_State) -> ok.",
+	} {
+		if !strings.Contains(erl, want) {
+			t.Fatalf("missing %q in:\n%s", want, erl)
+		}
+	}
+}
+
+func TestModuleReportsBehaviourAndRegistered(t *testing.T) {
+	src := `package echoserver
+import "go.muehmer.eu/wintermute/pkg/otp"
+type State struct{ Count int }
+func (State) Init() State { return State{Count: 0} }
+func (s State) HandleCall(Req string) (string, State) { return Req, State{Count: s.Count + 1} }
+func Start() { otp.StartServer("echo", State{}) }
+`
+	r, err := Module(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.Module != "echoserver" || r.Behaviour != "gen_server" {
+		t.Fatalf("got module=%q behaviour=%q", r.Module, r.Behaviour)
+	}
+	if len(r.Registered) != 1 || r.Registered[0] != "echo" {
+		t.Fatalf("registered = %v, want [echo]", r.Registered)
+	}
+}
+
+func TestAppResource(t *testing.T) {
+	got := AppResource("echoapp", "0.2.3",
+		[]string{"echoapp", "echosup", "echoserver"}, []string{"echo"})
+	want := `{application, echoapp,
+ [{description, "echoapp"},
+  {vsn, "0.2.3"},
+  {modules, [echoapp, echosup, echoserver]},
+  {registered, [echo]},
+  {applications, [kernel, stdlib]},
+  {mod, {echoapp, []}}]}.
+`
+	if got != want {
+		t.Fatalf("AppResource mismatch:\n--- got ---\n%s\n--- want ---\n%s", got, want)
+	}
+}

@@ -46,6 +46,24 @@ func TestGlobalMarkersPanic(t *testing.T) {
 	}
 }
 
+func TestStartSupervisorPanics(t *testing.T) {
+	defer func() {
+		r := recover()
+		msg, _ := r.(string)
+		if !strings.Contains(msg, "wm build") || !strings.Contains(msg, "StartSupervisor") {
+			t.Fatalf("panic message should name the symbol and the fix, got: %v", r)
+		}
+	}()
+	_ = StartSupervisor(nil)
+}
+
+func TestChildIsPlainData(t *testing.T) {
+	c := Child{ID: "echo", Start: func() {}}
+	if c.ID != "echo" || c.Start == nil {
+		t.Fatal("Child should hold an ID and a Start func without panicking")
+	}
+}
+
 func TestGenServerMarkersPanic(t *testing.T) {
 	for _, tc := range []struct {
 		name string

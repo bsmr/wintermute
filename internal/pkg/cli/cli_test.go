@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"os"
@@ -161,5 +162,73 @@ func TestParseVersionFlag(t *testing.T) {
 				t.Fatalf("rest = %v, want %v", rest, tt.wantRest)
 			}
 		})
+	}
+}
+
+func TestBuildEmitsAppFile(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name, body string) string {
+		p := filepath.Join(dir, name)
+		if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	app := write("app.go", `package echoapp
+import "go.muehmer.eu/wintermute/pkg/otp"
+import "example/echosup"
+type App struct{}
+func (App) Start() otp.Pid { return otp.StartSupervisor(echosup.Sup{}) }
+func (App) Stop()          {}
+`)
+	srv := write("srv.go", `package echoserver
+import "go.muehmer.eu/wintermute/pkg/otp"
+type State struct{ Count int }
+func (State) Init() State { return State{Count: 0} }
+func (s State) HandleCall(Req string) (string, State) { return Req, State{Count: s.Count + 1} }
+func Start() { otp.StartServer("echo", State{}) }
+`)
+	out := filepath.Join(dir, "out")
+	var buf bytes.Buffer
+	err := Run(context.Background(), []string{"build", app, srv, "--out", out, "--vsn", "0.2.3"},
+		nil, &buf, &buf)
+	if err != nil {
+		t.Fatalf("build: %v\n%s", err, buf.String())
+	}
+	appFile := filepath.Join(out, "echoapp.app")
+	data, err := os.ReadFile(appFile)
+	if err != nil {
+		t.Fatalf("expected %s: %v", appFile, err)
+	}
+	for _, want := range []string{
+		"{application, echoapp,",
+		`{vsn, "0.2.3"}`,
+		"{modules, [echoapp, echoserver]}",
+		"{registered, [echo]}",
+		"{mod, {echoapp, []}}",
+	} {
+		if !strings.Contains(string(data), want) {
+			t.Fatalf("missing %q in %s:\n%s", want, appFile, data)
+		}
+	}
+}
+
+func TestBuildSingleFileNoAppFile(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "srv.go")
+	os.WriteFile(p, []byte(`package echoserver
+import "go.muehmer.eu/wintermute/pkg/otp"
+func Start() { otp.StartServer("echo", nil) }
+`), 0o644)
+	out := filepath.Join(dir, "out")
+	var buf bytes.Buffer
+	if err := Run(context.Background(), []string{"build", p, "--out", out}, nil, &buf, &buf); err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(out, "echoserver.erl")); err != nil {
+		t.Fatalf("expected echoserver.erl: %v", err)
+	}
+	if entries, _ := filepath.Glob(filepath.Join(out, "*.app")); len(entries) != 0 {
+		t.Fatalf("no .app expected for a non-application build, got %v", entries)
 	}
 }

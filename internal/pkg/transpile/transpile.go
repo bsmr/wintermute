@@ -17,18 +17,50 @@ import (
 // (typeName -> ordered field names) so composite literals can be emitted
 // as tagged tuples in the correct order.
 type emitter struct {
-	structs map[string][]string
-	fset    *token.FileSet
+	structs    map[string][]string
+	fset       *token.FileSet
+	registered []string
 }
 
-// File parses Go source and emits an Erlang module string, along with the
-// module name (the Go package name) so callers don't need to re-parse the
-// emitted header to recover it.
+// Result is the full outcome of transpiling one Go file: the Erlang source, the
+// module name, the OTP behaviour ("", "gen_server", "supervisor", "application"),
+// and the names it registers via otp.StartServer (for the .app resource).
+type Result struct {
+	Erl        string
+	Module     string
+	Behaviour  string
+	Registered []string
+}
+
+// File transpiles src and returns the Erlang source and module name, discarding
+// the richer Result fields. Retained for callers that only need the source.
 func File(src string) (string, string, error) {
+	r, err := Module(src)
+	return r.Erl, r.Module, err
+}
+
+// AppResource returns the Erlang .app resource body for an OTP application.
+// applications is always [kernel, stdlib]; mod is {app, []}.
+func AppResource(app, vsn string, modules, registered []string) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "{application, %s,\n", app)
+	fmt.Fprintf(&b, " [{description, %q},\n", app)
+	fmt.Fprintf(&b, "  {vsn, %q},\n", vsn)
+	fmt.Fprintf(&b, "  {modules, [%s]},\n", strings.Join(modules, ", "))
+	fmt.Fprintf(&b, "  {registered, [%s]},\n", strings.Join(registered, ", "))
+	fmt.Fprintf(&b, "  {applications, [kernel, stdlib]},\n")
+	fmt.Fprintf(&b, "  {mod, {%s, []}}]}.\n", app)
+	return b.String()
+}
+
+// Module parses Go source and emits an Erlang module (Result.Erl), along with
+// the module name (the Go package name), the detected OTP behaviour, and the
+// names it registers, so callers don't need to re-parse the emitted header.
+func Module(src string) (Result, error) {
 	fset := token.NewFileSet()
 	f, err := parser.ParseFile(fset, "src.go", src, 0)
 	if err != nil {
-		return "", "", err
+		return Result{}, err
 	}
 
 	structs := map[string][]string{}
@@ -50,7 +82,7 @@ func File(src string) (string, string, error) {
 			for _, fld := range st.Fields.List {
 				for _, n := range fld.Names {
 					if !token.IsExported(n.Name) {
-						return "", "", fmt.Errorf("struct %s field %s is lowercase-leading; Erlang variables must be uppercase",
+						return Result{}, fmt.Errorf("struct %s field %s is lowercase-leading; Erlang variables must be uppercase",
 							ts.Name.Name, n.Name)
 					}
 					fields = append(fields, n.Name)
@@ -70,11 +102,11 @@ func File(src string) (string, string, error) {
 			continue
 		}
 		if fn.Type.Params != nil && len(fn.Type.Params.List) != 0 {
-			return "", "", fmt.Errorf("unsupported function %s: parameters are not yet supported (echo subset); see the 0.2.x roadmap", fn.Name.Name)
+			return Result{}, fmt.Errorf("unsupported function %s: parameters are not yet supported (echo subset); see the 0.2.x roadmap", fn.Name.Name)
 		}
 		name := strings.ToLower(fn.Name.Name)
 		if prev, ok := seen[name]; ok {
-			return "", "", fmt.Errorf("functions %s and %s both map to Erlang atom %s (duplicate clause); rename one",
+			return Result{}, fmt.Errorf("functions %s and %s both map to Erlang atom %s (duplicate clause); rename one",
 				prev, fn.Name.Name, name)
 		}
 		seen[name] = fn.Name.Name
@@ -83,7 +115,7 @@ func File(src string) (string, string, error) {
 		}
 		stmts, err := em.emitBody(fn.Body)
 		if err != nil {
-			return "", "", err
+			return Result{}, err
 		}
 		// A single-statement body that emits on one line gets a one-line
 		// clause (e.g. `start() -> register(...).`). An empty body (which
@@ -108,19 +140,48 @@ func File(src string) (string, string, error) {
 	var behaviour string
 	var callbacks strings.Builder
 	for typeName, ms := range methods {
+		if methodNamed(ms, "Start") != nil && methodNamed(ms, "Stop") != nil {
+			behaviour = "-behaviour(application).\n"
+			exports = append(exports, "start/2", "stop/1")
+			start := methodNamed(ms, "Start")
+			results, err := returnExprs(start.Body)
+			if err != nil {
+				return Result{}, em.errorf(start, "Start: %s", err)
+			}
+			if len(results) != 1 {
+				return Result{}, em.errorf(start, "application Start must return the supervisor pid")
+			}
+			sup, err := em.emitExpr(results[0])
+			if err != nil {
+				return Result{}, err
+			}
+			fmt.Fprintf(&callbacks, "\nstart(_Type, _Args) -> %s.\nstop(_State) -> ok.\n", sup)
+			continue
+		}
+		if isSupervisorInit(methodNamed(ms, "Init")) {
+			behaviour = "-behaviour(supervisor).\n"
+			exports = append(exports, "start_link/0", "init/1")
+			children, err := em.supervisorChildren(methodNamed(ms, "Init"))
+			if err != nil {
+				return Result{}, err
+			}
+			fmt.Fprintf(&callbacks, "\nstart_link() -> supervisor:start_link({local, %s}, ?MODULE, []).\n", f.Name.Name)
+			fmt.Fprintf(&callbacks, "init(_) -> {ok, {{one_for_one, 1, 5}, [%s]}}.\n", strings.Join(children, ", "))
+			continue
+		}
 		initFn := methodNamed(ms, "Init")
 		if initFn == nil {
-			return "", "", fmt.Errorf("type %s has methods but no Init; not a recognized gen_server", typeName)
+			return Result{}, fmt.Errorf("type %s has methods but no Init; not a recognized gen_server", typeName)
 		}
 		behaviour = "-behaviour(gen_server).\n"
 		exports = append(exports, "init/1")
 		results, err := returnExprs(initFn.Body)
 		if err != nil {
-			return "", "", em.errorf(initFn, "Init: %s", err)
+			return Result{}, em.errorf(initFn, "Init: %s", err)
 		}
 		state, err := em.emitExpr(results[0])
 		if err != nil {
-			return "", "", err
+			return Result{}, err
 		}
 		fmt.Fprintf(&callbacks, "\ninit(_) -> {ok, %s}.\n", state)
 
@@ -128,11 +189,11 @@ func File(src string) (string, string, error) {
 			exports = append(exports, "handle_call/3")
 			// Param -> uppercase Erlang variable (guiding principle: reject lowercase).
 			if hc.Type.Params == nil || len(hc.Type.Params.List) != 1 || len(hc.Type.Params.List[0].Names) != 1 {
-				return "", "", em.errorf(hc, "HandleCall must take exactly one parameter")
+				return Result{}, em.errorf(hc, "HandleCall must take exactly one parameter")
 			}
 			param := hc.Type.Params.List[0].Names[0].Name
 			if !token.IsExported(param) {
-				return "", "", em.errorf(hc, "HandleCall parameter %s is lowercase-leading; Erlang variables must be uppercase", param)
+				return Result{}, em.errorf(hc, "HandleCall parameter %s is lowercase-leading; Erlang variables must be uppercase", param)
 			}
 			// Receiver state head-pattern: {state, F1, F2, ...} binding all fields.
 			statePat := []string{strings.ToLower(typeName)}
@@ -141,18 +202,18 @@ func File(src string) (string, string, error) {
 			// Body: return Reply, NewState -> {reply, Reply, NewState}.
 			hcResults, err := returnExprs(hc.Body)
 			if err != nil {
-				return "", "", em.errorf(hc, "HandleCall: %s", err)
+				return Result{}, em.errorf(hc, "HandleCall: %s", err)
 			}
 			if len(hcResults) != 2 {
-				return "", "", em.errorf(hc, "HandleCall must return (reply, state)")
+				return Result{}, em.errorf(hc, "HandleCall must return (reply, state)")
 			}
 			reply, err := em.emitExpr(hcResults[0])
 			if err != nil {
-				return "", "", err
+				return Result{}, err
 			}
 			next, err := em.emitExpr(hcResults[1])
 			if err != nil {
-				return "", "", err
+				return Result{}, err
 			}
 			fmt.Fprintf(&callbacks, "handle_call(%s, _From, %s) -> {reply, %s, %s}.\n", param, pattern, reply, next)
 		}
@@ -164,7 +225,13 @@ func File(src string) (string, string, error) {
 	fmt.Fprintf(&b, "-export([%s]).\n", strings.Join(exports, ", "))
 	b.WriteString(bodies.String())
 	b.WriteString(callbacks.String())
-	return b.String(), f.Name.Name, nil
+	// behaviourName is derived from the emitted directive so the three branches
+	// above don't each have to track it separately.
+	behaviourName := ""
+	if behaviour != "" {
+		behaviourName = strings.TrimSuffix(strings.TrimPrefix(behaviour, "-behaviour("), ").\n")
+	}
+	return Result{Erl: b.String(), Module: f.Name.Name, Behaviour: behaviourName, Registered: em.registered}, nil
 }
 
 // emitBody returns the Erlang expression sequence for a function body.
@@ -385,11 +452,30 @@ func (em *emitter) emitCall(c *ast.CallExpr) (string, error) {
 	// otp.StartServer("echo", State{}) — the second arg is a type marker (which
 	// gen_server type carries the callbacks); the current module IS the
 	// gen_server (?MODULE), so it is not emitted as a runtime value.
+	if sel.Sel.Name == "StartSupervisor" {
+		if len(c.Args) != 1 {
+			return "", em.errorf(c, "otp.StartSupervisor takes one supervisor value")
+		}
+		lit, ok := c.Args[0].(*ast.CompositeLit)
+		if !ok {
+			return "", em.errorf(c, "otp.StartSupervisor requires a supervisor value, e.g. echosup.Sup{}")
+		}
+		selT, ok := lit.Type.(*ast.SelectorExpr)
+		if !ok {
+			return "", em.errorf(c, "otp.StartSupervisor argument must be pkg.Type{}")
+		}
+		pkg, ok := selT.X.(*ast.Ident)
+		if !ok {
+			return "", em.errorf(c, "otp.StartSupervisor argument must be pkg.Type{}")
+		}
+		return pkg.Name + ":start_link()", nil
+	}
 	if sel.Sel.Name == "StartServer" {
 		name, err := em.emitExpr(c.Args[0])
 		if err != nil {
 			return "", err
 		}
+		em.registered = append(em.registered, unquoteAtom(name))
 		return fmt.Sprintf("gen_server:start_link({local, %s}, ?MODULE, [], [])", unquoteAtom(name)), nil
 	}
 	args := make([]string, len(c.Args))
@@ -453,6 +539,77 @@ func receiverTypeName(fn *ast.FuncDecl) string {
 		}
 	}
 	return ""
+}
+
+// isSupervisorInit reports whether fn is an `Init() []otp.Child` method, which
+// marks a supervisor (as opposed to a gen_server's `Init() State`).
+func isSupervisorInit(fn *ast.FuncDecl) bool {
+	if fn == nil || fn.Type.Results == nil || len(fn.Type.Results.List) != 1 {
+		return false
+	}
+	arr, ok := fn.Type.Results.List[0].Type.(*ast.ArrayType)
+	if !ok {
+		return false
+	}
+	sel, ok := arr.Elt.(*ast.SelectorExpr)
+	return ok && otpPkgIdent(sel.X) && sel.Sel.Name == "Child"
+}
+
+// supervisorChildren emits one Erlang child spec string per otp.Child in the
+// supervisor Init's returned []otp.Child literal. Each child's Start is a
+// package-qualified function value (pkg.Fn) mapped to the MFA {pkg, fn, []}.
+func (em *emitter) supervisorChildren(fn *ast.FuncDecl) ([]string, error) {
+	results, err := returnExprs(fn.Body)
+	if err != nil {
+		return nil, em.errorf(fn, "Init: %s", err)
+	}
+	if len(results) != 1 {
+		return nil, em.errorf(fn, "supervisor Init must return one []otp.Child")
+	}
+	lit, ok := results[0].(*ast.CompositeLit)
+	if !ok {
+		return nil, em.errorf(fn, "supervisor Init must return an []otp.Child literal")
+	}
+	var specs []string
+	for _, elt := range lit.Elts {
+		child, ok := elt.(*ast.CompositeLit)
+		if !ok {
+			return nil, em.errorf(elt, "supervisor child must be an otp.Child literal")
+		}
+		var id, mod, function string
+		for _, e := range child.Elts {
+			kv, ok := e.(*ast.KeyValueExpr)
+			if !ok {
+				return nil, em.errorf(e, "otp.Child needs field: value")
+			}
+			switch kv.Key.(*ast.Ident).Name {
+			case "ID":
+				bl, ok := kv.Value.(*ast.BasicLit)
+				if !ok || bl.Kind != token.STRING {
+					return nil, em.errorf(kv.Value, "otp.Child ID must be a string literal")
+				}
+				id = strings.Trim(bl.Value, `"`)
+			case "Start":
+				sel, ok := kv.Value.(*ast.SelectorExpr)
+				if !ok {
+					return nil, em.errorf(kv.Value, "otp.Child Start must be a package-qualified function, e.g. echoserver.Start")
+				}
+				pkg, ok := sel.X.(*ast.Ident)
+				if !ok {
+					return nil, em.errorf(kv.Value, "otp.Child Start must be pkg.Func")
+				}
+				mod = pkg.Name
+				function = strings.ToLower(sel.Sel.Name)
+			default:
+				return nil, em.errorf(kv.Key, "unsupported otp.Child field %s", kv.Key.(*ast.Ident).Name)
+			}
+		}
+		if id == "" || mod == "" {
+			return nil, em.errorf(child, "otp.Child needs both ID and Start")
+		}
+		specs = append(specs, fmt.Sprintf("{%s, {%s, %s, []}, permanent, 5000, worker, [%s]}", id, mod, function, mod))
+	}
+	return specs, nil
 }
 
 // methodNamed returns the method named name from ms, or nil.

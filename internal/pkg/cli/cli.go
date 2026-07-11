@@ -59,38 +59,96 @@ func usage(w io.Writer) {
 	}
 }
 
-// buildCmd transpiles the Go source file at args[0] to Erlang and writes it
-// to <out>/<module>.erl (out defaults to bin, overridable via --out),
-// printing the output path to stdout. Refuses to overwrite an existing
-// output file.
+// buildCmd transpiles each Go source path to Erlang, writing <out>/<module>.erl
+// (out defaults to bin, overridable via --out) and refusing to overwrite. When
+// exactly one input is an OTP application module, it also writes <out>/<app>.app,
+// with vsn from --vsn or the VERSION file.
 func buildCmd(args []string, stdout io.Writer) error {
-	out, rest, err := parseOutFlag(args)
+	vsn, rest, err := parseVsnFlag(args)
 	if err != nil {
 		return err
 	}
-	if len(rest) != 1 {
-		return fmt.Errorf("usage: wm build <path> [--out DIR]")
-	}
-	src, err := os.ReadFile(rest[0])
+	out, rest, err := parseOutFlag(rest)
 	if err != nil {
 		return err
 	}
-	erl, mod, err := transpile.File(string(src))
-	if err != nil {
-		return err
-	}
-	dst := outPath(out, mod)
-	if _, err := os.Stat(dst); err == nil {
-		return fmt.Errorf("%s already exists (refusing to overwrite; use --out or remove it)", dst)
+	if len(rest) == 0 {
+		return fmt.Errorf("usage: wm build <path>... [--out DIR] [--vsn X]")
 	}
 	if err := os.MkdirAll(out, 0o755); err != nil {
 		return err
 	}
-	if err := os.WriteFile(dst, []byte(erl), 0o644); err != nil {
-		return err
+	var modules, registered []string
+	var appMod string
+	for _, path := range rest {
+		src, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		r, err := transpile.Module(string(src))
+		if err != nil {
+			return err
+		}
+		dst := outPath(out, r.Module)
+		if _, err := os.Stat(dst); err == nil {
+			return fmt.Errorf("%s already exists (refusing to overwrite; use --out or remove it)", dst)
+		}
+		if err := os.WriteFile(dst, []byte(r.Erl), 0o644); err != nil {
+			return err
+		}
+		fmt.Fprintln(stdout, dst)
+		modules = append(modules, r.Module)
+		registered = append(registered, r.Registered...)
+		if r.Behaviour == "application" {
+			if appMod != "" {
+				return fmt.Errorf("more than one application module (%s and %s)", appMod, r.Module)
+			}
+			appMod = r.Module
+		}
 	}
-	fmt.Fprintln(stdout, dst)
+	if appMod != "" {
+		if vsn == "" {
+			vsn, err = readVersion()
+			if err != nil {
+				return err
+			}
+		}
+		appFile := filepath.Join(out, appMod+".app")
+		body := transpile.AppResource(appMod, vsn, modules, registered)
+		if err := os.WriteFile(appFile, []byte(body), 0o644); err != nil {
+			return err
+		}
+		fmt.Fprintln(stdout, appFile)
+	}
 	return nil
+}
+
+// parseVsnFlag pulls an optional --vsn X (or --vsn=X); empty if absent.
+func parseVsnFlag(args []string) (vsn string, rest []string, err error) {
+	for i := 0; i < len(args); i++ {
+		switch a := args[i]; {
+		case a == "--vsn":
+			if i+1 >= len(args) {
+				return "", nil, fmt.Errorf("--vsn requires a value")
+			}
+			vsn = args[i+1]
+			i++
+		case strings.HasPrefix(a, "--vsn="):
+			vsn = strings.TrimPrefix(a, "--vsn=")
+		default:
+			rest = append(rest, a)
+		}
+	}
+	return vsn, rest, nil
+}
+
+// readVersion reads and trims the project VERSION file in the working directory.
+func readVersion() (string, error) {
+	data, err := os.ReadFile("VERSION")
+	if err != nil {
+		return "", fmt.Errorf("no --vsn given and cannot read VERSION: %w", err)
+	}
+	return strings.TrimSpace(string(data)), nil
 }
 
 // runCmd transpiles the Go source file at args[0] to Erlang, writes it to
