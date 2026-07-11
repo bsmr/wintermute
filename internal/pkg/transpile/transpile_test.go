@@ -530,3 +530,43 @@ func TestAppResource(t *testing.T) {
 		t.Fatalf("AppResource mismatch:\n--- got ---\n%s\n--- want ---\n%s", got, want)
 	}
 }
+
+func TestModuleOutputIsDeterministic(t *testing.T) {
+	// Two method-carrying types force the methods-map iteration to matter;
+	// map order is randomized per range, so without sorting the emitted
+	// callback order varies across runs. Assert a single distinct output.
+	src := `package m
+import "go.muehmer.eu/wintermute/pkg/otp"
+type Aaa struct{ X int }
+func (Aaa) Init() Aaa { return Aaa{X: 0} }
+type Bbb struct{ Y int }
+func (Bbb) Init() Bbb { return Bbb{Y: 0} }
+`
+	seen := map[string]struct{}{}
+	for i := 0; i < 50; i++ {
+		erl, _, err := File(src)
+		if err != nil {
+			t.Fatal(err)
+		}
+		seen[erl] = struct{}{}
+	}
+	if len(seen) != 1 {
+		t.Fatalf("non-deterministic output: %d distinct results across 50 runs", len(seen))
+	}
+}
+
+func TestOtpCallWrongArityErrors(t *testing.T) {
+	// otp.Call takes two args; one arg parses fine (no type-checking) and must
+	// yield a clean positioned error, not an index-out-of-range panic.
+	src := `package m
+import "go.muehmer.eu/wintermute/pkg/otp"
+func Bad() { otp.Call("x") }
+`
+	_, _, err := File(src)
+	if err == nil {
+		t.Fatal("want error for otp.Call with wrong arity, got nil")
+	}
+	if !strings.Contains(err.Error(), "Call") {
+		t.Fatalf("error should name the call, got: %v", err)
+	}
+}

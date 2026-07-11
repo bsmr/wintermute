@@ -9,6 +9,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"sort"
 	"strings"
 )
 
@@ -139,7 +140,16 @@ func Module(src string) (Result, error) {
 	}
 	var behaviour string
 	var callbacks strings.Builder
-	for typeName, ms := range methods {
+	// Iterate method-carrying types in a stable order: Go map iteration is
+	// randomized, and emitting callbacks/exports in map order would make the
+	// output non-deterministic, breaking the deterministic-compiler guarantee.
+	typeNames := make([]string, 0, len(methods))
+	for k := range methods {
+		typeNames = append(typeNames, k)
+	}
+	sort.Strings(typeNames)
+	for _, typeName := range typeNames {
+		ms := methods[typeName]
 		if methodNamed(ms, "Start") != nil && methodNamed(ms, "Stop") != nil {
 			behaviour = "-behaviour(application).\n"
 			exports = append(exports, "start/2", "stop/1")
@@ -477,6 +487,16 @@ func (em *emitter) emitCall(c *ast.CallExpr) (string, error) {
 		}
 		em.registered = append(em.registered, unquoteAtom(name))
 		return fmt.Sprintf("gen_server:start_link({local, %s}, ?MODULE, [], [])", unquoteAtom(name)), nil
+	}
+	// Guard arity before indexing args below: Module only parses (no
+	// type-checking), so a wrong-arity marker call like otp.Call("x") reaches
+	// here and must yield a positioned error, not an index-out-of-range panic.
+	arity := map[string]int{
+		"Send": 2, "Register": 2, "Whereis": 1, "RegisterGlobal": 2,
+		"WhereisGlobal": 1, "Call": 2, "Self": 0, "Print": 1,
+	}
+	if n, ok := arity[sel.Sel.Name]; ok && len(c.Args) != n {
+		return "", em.errorf(c, "otp.%s expects %d argument(s), got %d", sel.Sel.Name, n, len(c.Args))
 	}
 	args := make([]string, len(c.Args))
 	for i, a := range c.Args {
