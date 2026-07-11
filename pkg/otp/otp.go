@@ -25,3 +25,6 @@ func WhereisGlobal(name string) Pid     { transpileOnly("WhereisGlobal"); return
 func Send(to Pid, msg any)              { transpileOnly("Send") }                        // -> To ! Msg
 func Receive() any                      { transpileOnly("Receive"); return nil }         // -> receive <clause> end
 func Print(s string)                    { transpileOnly("Print") }                       // -> io:format("~s~n", [S])
+
+func StartServer(name string, init any) { transpileOnly("StartServer") }      // -> gen_server:start_link({local,name}, ?MODULE, [], [])
+func Call(name string, req any) any     { transpileOnly("Call"); return nil } // -> gen_server:call(name, Req)

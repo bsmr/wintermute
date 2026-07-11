@@ -45,3 +45,24 @@ func TestGlobalMarkersPanic(t *testing.T) {
 		})
 	}
 }
+
+func TestGenServerMarkersPanic(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		call func()
+	}{
+		{"StartServer", func() { StartServer("echo", nil) }},
+		{"Call", func() { _ = Call("echo", "hi") }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			defer func() {
+				r := recover()
+				msg, _ := r.(string)
+				if !strings.Contains(msg, "wm build") || !strings.Contains(msg, tc.name) {
+					t.Fatalf("panic message should name the symbol and the fix, got: %v", r)
+				}
+			}()
+			tc.call()
+		})
+	}
+}

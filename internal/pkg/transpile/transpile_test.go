@@ -2,6 +2,7 @@ package transpile
 
 import (
 	"go/ast"
+	"go/token"
 	"os"
 	"strings"
 	"testing"
@@ -208,11 +209,11 @@ func Boot() { otp.Print(x) }
 
 func TestFile_ErrorsCarryPosition(t *testing.T) {
 	src := `package m
-func Boot() { 1 + 2 }
+func Boot() { 1 - 2 }
 `
 	_, _, err := File(src)
 	if err == nil {
-		t.Fatal("want error for unsupported binary expression, got nil")
+		t.Fatal("want error for unsupported binary operator, got nil")
 	}
 	if !strings.Contains(err.Error(), "src.go:2") {
 		t.Fatalf("error should carry a src.go:line position, got: %v", err)
@@ -290,5 +291,153 @@ func TestFile_GoldenDistClient(t *testing.T) {
 	}
 	if !strings.Contains(got, "global:whereis_name(echo) ! {echo, self(), <<\"hello\">>}") {
 		t.Fatalf("missing global:whereis_name send in:\n%s", got)
+	}
+}
+
+func TestEmitExpr_IntAndAdd(t *testing.T) {
+	em := &emitter{structs: map[string][]string{}}
+	// Count + 1
+	expr := &ast.BinaryExpr{
+		X:  &ast.Ident{Name: "Count"},
+		Op: token.ADD,
+		Y:  &ast.BasicLit{Kind: token.INT, Value: "1"},
+	}
+	got, err := em.emitExpr(expr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "Count + 1" {
+		t.Fatalf("got %q, want %q", got, "Count + 1")
+	}
+}
+
+func TestEmitExpr_NonAddBinaryErrors(t *testing.T) {
+	em := &emitter{structs: map[string][]string{}}
+	expr := &ast.BinaryExpr{X: &ast.Ident{Name: "A"}, Op: token.SUB, Y: &ast.Ident{Name: "B"}}
+	if _, err := em.emitExpr(expr); err == nil {
+		t.Fatal("want error for unsupported binary operator, got nil")
+	}
+}
+
+func TestFile_GenServerCall(t *testing.T) {
+	src := `package m
+import "go.muehmer.eu/wintermute/pkg/otp"
+func Main() { otp.Print(otp.Call("echo", "hello").(string)) }
+`
+	got, _, err := File(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(got, `io:format("~s~n", [gen_server:call(echo, <<"hello">>)])`) {
+		t.Fatalf("got:\n%s", got)
+	}
+}
+
+func TestFile_StartServer(t *testing.T) {
+	src := `package m
+import "go.muehmer.eu/wintermute/pkg/otp"
+type State struct{ Count int }
+func Start() { otp.StartServer("echo", State{}) }
+`
+	got, _, err := File(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(got, "start() -> gen_server:start_link({local, echo}, ?MODULE, [], []).") {
+		t.Fatalf("got:\n%s", got)
+	}
+}
+
+func TestFile_GenServerInit(t *testing.T) {
+	src := `package echoserver
+import "go.muehmer.eu/wintermute/pkg/otp"
+type State struct{ Count int }
+func (State) Init() State { return State{Count: 0} }
+var _ = otp.Self
+`
+	got, _, err := File(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"-behaviour(gen_server).",
+		"init(_) -> {ok, {state, 0}}.",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("missing %q in:\n%s", want, got)
+		}
+	}
+}
+
+func TestFile_GenServerHandleCall(t *testing.T) {
+	src := `package echoserver
+import "go.muehmer.eu/wintermute/pkg/otp"
+type State struct{ Count int }
+func (State) Init() State { return State{Count: 0} }
+func (s State) HandleCall(Req string) (string, State) {
+	return Req, State{Count: s.Count + 1}
+}
+var _ = otp.Self
+`
+	got, _, err := File(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"handle_call/3",
+		"handle_call(Req, _From, {state, Count}) -> {reply, Req, {state, Count + 1}}.",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("missing %q in:\n%s", want, got)
+		}
+	}
+}
+
+func TestFile_GenServerLowercaseParamErrors(t *testing.T) {
+	src := `package echoserver
+import "go.muehmer.eu/wintermute/pkg/otp"
+type State struct{ Count int }
+func (State) Init() State { return State{Count: 0} }
+func (s State) HandleCall(req string) (string, State) { return req, s }
+var _ = otp.Self
+`
+	if _, _, err := File(src); err == nil {
+		t.Fatal("want error for lowercase-leading callback param, got nil")
+	}
+}
+
+func TestFile_GoldenGenServer(t *testing.T) {
+	src, err := os.ReadFile("../../../testdata/genserver/go/echoserver/main.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, _, err := File(string(src))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"-module(echoserver).",
+		"-behaviour(gen_server).",
+		"init(_) -> {ok, {state, 0}}.",
+		"handle_call(Req, _From, {state, Count}) -> {reply, Req, {state, Count + 1}}.",
+		"start() -> gen_server:start_link({local, echo}, ?MODULE, [], []).",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("missing %q in:\n%s", want, got)
+		}
+	}
+}
+
+func TestFile_GoldenGenServerClient(t *testing.T) {
+	src, err := os.ReadFile("../../../testdata/genserver/go/echoclient/main.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, _, err := File(string(src))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(got, `main() -> io:format("~s~n", [gen_server:call(echo, <<"hello">>)]).`) {
+		t.Fatalf("got:\n%s", got)
 	}
 }

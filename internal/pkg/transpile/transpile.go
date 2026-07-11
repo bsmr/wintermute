@@ -95,10 +95,75 @@ func File(src string) (string, string, error) {
 			fmt.Fprintf(&bodies, "\n%s() ->\n%s.\n", name, indent(stmts))
 		}
 	}
+	// Collect methods by receiver type; a type with an Init method is a
+	// gen_server, emitted as behaviour callbacks after the plain functions.
+	methods := map[string][]*ast.FuncDecl{}
+	for _, d := range f.Decls {
+		fn, ok := d.(*ast.FuncDecl)
+		if !ok || fn.Recv == nil {
+			continue
+		}
+		methods[receiverTypeName(fn)] = append(methods[receiverTypeName(fn)], fn)
+	}
+	var behaviour string
+	var callbacks strings.Builder
+	for typeName, ms := range methods {
+		initFn := methodNamed(ms, "Init")
+		if initFn == nil {
+			return "", "", fmt.Errorf("type %s has methods but no Init; not a recognized gen_server", typeName)
+		}
+		behaviour = "-behaviour(gen_server).\n"
+		exports = append(exports, "init/1")
+		results, err := returnExprs(initFn.Body)
+		if err != nil {
+			return "", "", em.errorf(initFn, "Init: %s", err)
+		}
+		state, err := em.emitExpr(results[0])
+		if err != nil {
+			return "", "", err
+		}
+		fmt.Fprintf(&callbacks, "\ninit(_) -> {ok, %s}.\n", state)
+
+		if hc := methodNamed(ms, "HandleCall"); hc != nil {
+			exports = append(exports, "handle_call/3")
+			// Param -> uppercase Erlang variable (guiding principle: reject lowercase).
+			if hc.Type.Params == nil || len(hc.Type.Params.List) != 1 || len(hc.Type.Params.List[0].Names) != 1 {
+				return "", "", em.errorf(hc, "HandleCall must take exactly one parameter")
+			}
+			param := hc.Type.Params.List[0].Names[0].Name
+			if !token.IsExported(param) {
+				return "", "", em.errorf(hc, "HandleCall parameter %s is lowercase-leading; Erlang variables must be uppercase", param)
+			}
+			// Receiver state head-pattern: {state, F1, F2, ...} binding all fields.
+			statePat := []string{strings.ToLower(typeName)}
+			statePat = append(statePat, em.structs[typeName]...)
+			pattern := "{" + strings.Join(statePat, ", ") + "}"
+			// Body: return Reply, NewState -> {reply, Reply, NewState}.
+			hcResults, err := returnExprs(hc.Body)
+			if err != nil {
+				return "", "", em.errorf(hc, "HandleCall: %s", err)
+			}
+			if len(hcResults) != 2 {
+				return "", "", em.errorf(hc, "HandleCall must return (reply, state)")
+			}
+			reply, err := em.emitExpr(hcResults[0])
+			if err != nil {
+				return "", "", err
+			}
+			next, err := em.emitExpr(hcResults[1])
+			if err != nil {
+				return "", "", err
+			}
+			fmt.Fprintf(&callbacks, "handle_call(%s, _From, %s) -> {reply, %s, %s}.\n", param, pattern, reply, next)
+		}
+	}
+
 	var b strings.Builder
 	fmt.Fprintf(&b, "-module(%s).\n", f.Name.Name)
+	b.WriteString(behaviour)
 	fmt.Fprintf(&b, "-export([%s]).\n", strings.Join(exports, ", "))
 	b.WriteString(bodies.String())
+	b.WriteString(callbacks.String())
 	return b.String(), f.Name.Name, nil
 }
 
@@ -218,10 +283,26 @@ func (em *emitter) emitStmt(s ast.Stmt) (string, error) {
 func (em *emitter) emitExpr(e ast.Expr) (string, error) {
 	switch ex := e.(type) {
 	case *ast.BasicLit:
-		if ex.Kind == token.STRING {
+		switch ex.Kind {
+		case token.STRING:
 			return "<<" + ex.Value + ">>", nil // ex.Value keeps the quotes
+		case token.INT:
+			return ex.Value, nil
 		}
 		return "", em.errorf(ex, "unsupported literal: %s", ex.Value)
+	case *ast.BinaryExpr:
+		if ex.Op != token.ADD {
+			return "", em.errorf(ex, "unsupported binary operator %s (only + in the gen_server subset)", ex.Op)
+		}
+		l, err := em.emitExpr(ex.X)
+		if err != nil {
+			return "", err
+		}
+		r, err := em.emitExpr(ex.Y)
+		if err != nil {
+			return "", err
+		}
+		return l + " + " + r, nil
 	case *ast.CallExpr:
 		return em.emitCall(ex)
 	case *ast.CompositeLit:
@@ -267,6 +348,10 @@ func (em *emitter) emitExpr(e ast.Expr) (string, error) {
 			return "", em.errorf(ex, "bare identifier %s is lowercase-leading; Erlang variables must be uppercase", ex.Name)
 		}
 		return ex.Name, nil
+	case *ast.TypeAssertExpr:
+		// x.(T) outside a receive: Erlang is dynamically typed, so the
+		// assertion is Go-only — emit the inner expression.
+		return em.emitExpr(ex.X)
 	default:
 		return "", em.errorf(e, "unsupported expression: %T", e)
 	}
@@ -297,6 +382,16 @@ func (em *emitter) emitCall(c *ast.CallExpr) (string, error) {
 		}
 		return fmt.Sprintf("spawn(fun ?MODULE:%s/0)", strings.ToLower(id.Name)), nil
 	}
+	// otp.StartServer("echo", State{}) — the second arg is a type marker (which
+	// gen_server type carries the callbacks); the current module IS the
+	// gen_server (?MODULE), so it is not emitted as a runtime value.
+	if sel.Sel.Name == "StartServer" {
+		name, err := em.emitExpr(c.Args[0])
+		if err != nil {
+			return "", err
+		}
+		return fmt.Sprintf("gen_server:start_link({local, %s}, ?MODULE, [], [])", unquoteAtom(name)), nil
+	}
 	args := make([]string, len(c.Args))
 	for i, a := range c.Args {
 		s, err := em.emitExpr(a)
@@ -316,6 +411,8 @@ func (em *emitter) emitCall(c *ast.CallExpr) (string, error) {
 		return fmt.Sprintf("global:register_name(%s, %s)", unquoteAtom(args[0]), args[1]), nil
 	case "WhereisGlobal":
 		return fmt.Sprintf("global:whereis_name(%s)", unquoteAtom(args[0])), nil
+	case "Call":
+		return fmt.Sprintf("gen_server:call(%s, %s)", unquoteAtom(args[0]), args[1]), nil
 	case "Self":
 		return "self()", nil
 	case "Print":
@@ -339,4 +436,44 @@ func unquoteAtom(s string) string {
 
 func indent(s string) string {
 	return "    " + strings.ReplaceAll(s, "\n", "\n    ")
+}
+
+// receiverTypeName returns the name of fn's receiver type (value or pointer),
+// or "" if fn has no receiver.
+func receiverTypeName(fn *ast.FuncDecl) string {
+	if fn.Recv == nil || len(fn.Recv.List) == 0 {
+		return ""
+	}
+	switch t := fn.Recv.List[0].Type.(type) {
+	case *ast.Ident:
+		return t.Name
+	case *ast.StarExpr:
+		if id, ok := t.X.(*ast.Ident); ok {
+			return id.Name
+		}
+	}
+	return ""
+}
+
+// methodNamed returns the method named name from ms, or nil.
+func methodNamed(ms []*ast.FuncDecl, name string) *ast.FuncDecl {
+	for _, m := range ms {
+		if m.Name.Name == name {
+			return m
+		}
+	}
+	return nil
+}
+
+// returnExprs returns the expressions of the single return statement in body,
+// or an error if the body is not exactly one return statement.
+func returnExprs(body *ast.BlockStmt) ([]ast.Expr, error) {
+	if body == nil || len(body.List) != 1 {
+		return nil, fmt.Errorf("callback body must be a single return statement")
+	}
+	ret, ok := body.List[0].(*ast.ReturnStmt)
+	if !ok {
+		return nil, fmt.Errorf("callback body must be a return statement")
+	}
+	return ret.Results, nil
 }
