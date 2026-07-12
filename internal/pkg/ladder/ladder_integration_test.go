@@ -93,3 +93,22 @@ func TestRung4_BothWintermute(t *testing.T) {
 		t.Fatalf("rung4 echo = %q", got)
 	}
 }
+
+// TestRung_ValueModel transpiles the 0.3.1 value-model fixture (parameters,
+// a local binding, a call with arguments) and proves the emitted Erlang
+// actually compiles with erlc — green unit tests are not enough.
+func TestRung_ValueModel(t *testing.T) {
+	home, _ := os.UserHomeDir()
+	l := erlang.NewLayout(home, erlang.DefaultVersion)
+	if !l.Installed() {
+		t.Skip("local Erlang not installed; run erlang provisioning first")
+	}
+	dir := t.TempDir()
+	erl := transpileToErl(t, filepath.FromSlash("../../../testdata/valuemodel/math.go"), dir)
+	if out, err := exec.Command(l.Erlc(), "-o", dir, erl).CombinedOutput(); err != nil {
+		t.Fatalf("erlc %s: %v\n%s", erl, err, out)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "math.beam")); err != nil {
+		t.Fatalf("no math.beam produced: %v", err)
+	}
+}

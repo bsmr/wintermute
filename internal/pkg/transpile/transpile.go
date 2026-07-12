@@ -21,6 +21,7 @@ type emitter struct {
 	structs    map[string][]string
 	fset       *token.FileSet
 	registered []string
+	bound      map[string]bool
 }
 
 // Result is the full outcome of transpiling one Go file: the Erlang source, the
@@ -102,8 +103,9 @@ func Module(src string) (Result, error) {
 		if !ok || fn.Recv != nil {
 			continue
 		}
-		if fn.Type.Params != nil && len(fn.Type.Params.List) != 0 {
-			return Result{}, fmt.Errorf("unsupported function %s: parameters are not yet supported (echo subset); see the 0.2.x roadmap", fn.Name.Name)
+		params, err := em.paramNames(fn)
+		if err != nil {
+			return Result{}, err
 		}
 		name := strings.ToLower(fn.Name.Name)
 		if prev, ok := seen[name]; ok {
@@ -112,7 +114,11 @@ func Module(src string) (Result, error) {
 		}
 		seen[name] = fn.Name.Name
 		if fn.Name.IsExported() {
-			exports = append(exports, name+"/0")
+			exports = append(exports, fmt.Sprintf("%s/%d", name, len(params)))
+		}
+		em.bound = map[string]bool{}
+		for _, p := range params {
+			em.bound[p] = true
 		}
 		stmts, err := em.emitBody(fn.Body)
 		if err != nil {
@@ -122,10 +128,11 @@ func Module(src string) (Result, error) {
 		// clause (e.g. `start() -> register(...).`). An empty body (which
 		// emits the "ok" placeholder) and multi-statement bodies keep the
 		// standard indented multi-line form.
+		head := name + "(" + strings.Join(params, ", ") + ")"
 		if fn.Body != nil && len(fn.Body.List) == 1 && !strings.Contains(stmts, "\n") {
-			fmt.Fprintf(&bodies, "\n%s() -> %s.\n", name, stmts)
+			fmt.Fprintf(&bodies, "\n%s -> %s.\n", head, stmts)
 		} else {
-			fmt.Fprintf(&bodies, "\n%s() ->\n%s.\n", name, indent(stmts))
+			fmt.Fprintf(&bodies, "\n%s ->\n%s.\n", head, indent(stmts))
 		}
 	}
 	// Collect methods by receiver type; a type with an Init method is a
@@ -260,12 +267,15 @@ func (em *emitter) emitBody(body *ast.BlockStmt) (string, error) {
 		if !ok || !em.isReceiveAssign(as) {
 			continue
 		}
-		pre, err := em.emitStmts(body.List[:i])
+		pre, err := em.emitStmts(body.List[:i], false)
 		if err != nil {
 			return "", err
 		}
-		pat, _, _ := em.receiveHead(body.List[i:])
-		inner, err := em.emitStmts(body.List[i+1:])
+		pat, _, err := em.receiveHead(body.List[i:])
+		if err != nil {
+			return "", err
+		}
+		inner, err := em.emitStmts(body.List[i+1:], true)
 		if err != nil {
 			return "", err
 		}
@@ -276,7 +286,7 @@ func (em *emitter) emitBody(body *ast.BlockStmt) (string, error) {
 		}
 		return pre + ",\n" + recv, nil
 	}
-	return em.emitStmts(body.List)
+	return em.emitStmts(body.List, true)
 }
 
 // isReceiveAssign reports whether as is `x := otp.Receive().(T)`.
@@ -292,11 +302,31 @@ func (em *emitter) isReceiveAssign(as *ast.AssignStmt) bool {
 	return ok && isOtpCall(c, "Receive")
 }
 
-// emitStmts emits a list of statements as a comma-separated Erlang
-// expression sequence.
-func (em *emitter) emitStmts(list []ast.Stmt) (string, error) {
+// emitStmts emits a list of statements as a comma-separated Erlang expression
+// sequence. isTail reports whether this list occupies the function's tail
+// position (its last statement is the function's value): only then may the
+// final statement be a return, emitted as the trailing value. A return in a
+// non-tail slice, or before the last statement of a tail slice, is rejected
+// (Erlang has no early return; 0.3.2 adds case/if). This distinction matters
+// because emitBody splits a receive body into a non-tail `pre` slice and a
+// tail clause body.
+func (em *emitter) emitStmts(list []ast.Stmt, isTail bool) (string, error) {
 	var parts []string
-	for _, s := range list {
+	for i, s := range list {
+		if ret, ok := s.(*ast.ReturnStmt); ok {
+			if !isTail || i != len(list)-1 {
+				return "", em.errorf(ret, "early return is unsupported; needs case/if (0.3.2)")
+			}
+			if len(ret.Results) != 1 {
+				return "", em.errorf(ret, "return must yield exactly one value (multi-value return is 0.3.2+)")
+			}
+			e, err := em.emitExpr(ret.Results[0])
+			if err != nil {
+				return "", err
+			}
+			parts = append(parts, e)
+			continue
+		}
 		e, err := em.emitStmt(s)
 		if err != nil {
 			return "", err
@@ -306,31 +336,39 @@ func (em *emitter) emitStmts(list []ast.Stmt) (string, error) {
 	return strings.Join(parts, ",\n"), nil
 }
 
-// receiveHead recognizes a leading `x := otp.Receive().(T)` statement and
-// returns the Erlang tuple pattern for T (atom = lowercased type name, each
-// field bound to its capitalized field name) plus the remaining statements.
-func (em *emitter) receiveHead(list []ast.Stmt) (pattern string, rest []ast.Stmt, ok bool) {
+// receiveHead recognizes a leading `x := otp.Receive().(T)` statement, returns
+// the Erlang tuple pattern for T (atom = lowercased type name, each field bound
+// to its capitalized field name) plus the remaining statements, and registers
+// each field name as a bound Erlang variable. A field name that collides with
+// an already-bound name (a parameter, a prior `:=`, or a prior receive field)
+// is rejected: in Erlang an already-bound pattern variable is an equality match,
+// not a fresh binding, so emitting it would silently change the semantics.
+func (em *emitter) receiveHead(list []ast.Stmt) (pattern string, rest []ast.Stmt, err error) {
 	as, ok := list[0].(*ast.AssignStmt)
 	if !ok || as.Tok != token.DEFINE || len(as.Rhs) != 1 {
-		return "", nil, false
+		return "", nil, em.errorf(list[0], "internal: expected a receive-assign statement")
 	}
 	ta, ok := as.Rhs[0].(*ast.TypeAssertExpr)
 	if !ok {
-		return "", nil, false
+		return "", nil, em.errorf(as, "internal: expected a receive type assertion")
 	}
 	call, ok := ta.X.(*ast.CallExpr)
 	if !ok || !isOtpCall(call, "Receive") {
-		return "", nil, false
+		return "", nil, em.errorf(as, "internal: expected otp.Receive")
 	}
 	typ, ok := ta.Type.(*ast.Ident)
 	if !ok {
-		return "", nil, false
+		return "", nil, em.errorf(as, "otp.Receive type assertion must name a struct type")
 	}
 	parts := []string{strings.ToLower(typ.Name)}
 	for _, fld := range em.structs[typ.Name] {
-		parts = append(parts, fld) // field name is the bound Erlang variable
+		if em.bound[fld] {
+			return "", nil, em.errorf(as, "receive pattern field %s collides with an already-bound name; Erlang would treat it as an equality match, not a fresh binding — rename one", fld)
+		}
+		em.bound[fld] = true
+		parts = append(parts, fld) // field name is the freshly bound Erlang variable
 	}
-	return "{" + strings.Join(parts, ", ") + "}", list[1:], true
+	return "{" + strings.Join(parts, ", ") + "}", list[1:], nil
 }
 
 // isOtpCall reports whether c is a call to otp.<name>.
@@ -352,6 +390,29 @@ func (em *emitter) emitStmt(s ast.Stmt) (string, error) {
 	switch st := s.(type) {
 	case *ast.ExprStmt:
 		return em.emitExpr(st.X)
+	case *ast.AssignStmt:
+		if st.Tok == token.ASSIGN {
+			return "", em.errorf(st, "re-assignment is unsupported; Erlang variables are immutable (single-assignment only)")
+		}
+		if st.Tok != token.DEFINE || len(st.Lhs) != 1 || len(st.Rhs) != 1 {
+			return "", em.errorf(st, "only single-name := bindings are supported")
+		}
+		id, ok := st.Lhs[0].(*ast.Ident)
+		if !ok {
+			return "", em.errorf(st, "binding target must be a plain identifier")
+		}
+		if !token.IsExported(id.Name) {
+			return "", em.errorf(st, "binding %s is lowercase-leading; Erlang variables must be uppercase", id.Name)
+		}
+		if em.bound[id.Name] {
+			return "", em.errorf(st, "%s is already bound; Erlang has no rebinding", id.Name)
+		}
+		rhs, err := em.emitExpr(st.Rhs[0])
+		if err != nil {
+			return "", err
+		}
+		em.bound[id.Name] = true
+		return id.Name + " = " + rhs, nil
 	default:
 		return "", em.errorf(s, "unsupported statement: %T", s)
 	}
@@ -434,13 +495,27 @@ func (em *emitter) emitExpr(e ast.Expr) (string, error) {
 	}
 }
 
+// emitArgs emits each call argument as an Erlang expression, preserving order.
+func (em *emitter) emitArgs(exprs []ast.Expr) ([]string, error) {
+	args := make([]string, len(exprs))
+	for i, a := range exprs {
+		s, err := em.emitExpr(a)
+		if err != nil {
+			return nil, err
+		}
+		args[i] = s
+	}
+	return args, nil
+}
+
 func (em *emitter) emitCall(c *ast.CallExpr) (string, error) {
 	// bare self-call: Serve()
 	if id, ok := c.Fun.(*ast.Ident); ok {
-		if len(c.Args) != 0 {
-			return "", em.errorf(c, "unsupported call %s with arguments: only nullary self-calls are in the subset (see the 0.2.x roadmap)", id.Name)
+		args, err := em.emitArgs(c.Args)
+		if err != nil {
+			return "", err
 		}
-		return strings.ToLower(id.Name) + "()", nil
+		return strings.ToLower(id.Name) + "(" + strings.Join(args, ", ") + ")", nil
 	}
 	sel, ok := c.Fun.(*ast.SelectorExpr)
 	if !ok {
@@ -505,13 +580,9 @@ func (em *emitter) emitCall(c *ast.CallExpr) (string, error) {
 	if n, ok := arity[sel.Sel.Name]; ok && len(c.Args) != n {
 		return "", em.errorf(c, "otp.%s expects %d argument(s), got %d", sel.Sel.Name, n, len(c.Args))
 	}
-	args := make([]string, len(c.Args))
-	for i, a := range c.Args {
-		s, err := em.emitExpr(a)
-		if err != nil {
-			return "", err
-		}
-		args[i] = s
+	args, err := em.emitArgs(c.Args)
+	if err != nil {
+		return "", err
 	}
 	switch sel.Sel.Name {
 	case "Send":
@@ -551,6 +622,28 @@ func unquoteAtom(s string) string {
 
 func indent(s string) string {
 	return "    " + strings.ReplaceAll(s, "\n", "\n    ")
+}
+
+// paramNames returns the ordered parameter names of fn, flattening grouped
+// declarations (X, Y int -> [X, Y]). Each name becomes an Erlang variable, so a
+// lowercase-leading name is rejected (never auto-capitalized).
+func (em *emitter) paramNames(fn *ast.FuncDecl) ([]string, error) {
+	var names []string
+	if fn.Type.Params == nil {
+		return names, nil
+	}
+	for _, fld := range fn.Type.Params.List {
+		if len(fld.Names) == 0 {
+			return nil, em.errorf(fld, "unnamed parameter is unsupported; every parameter needs an uppercase name")
+		}
+		for _, n := range fld.Names {
+			if !token.IsExported(n.Name) {
+				return nil, em.errorf(n, "parameter %s is lowercase-leading; Erlang variables must be uppercase", n.Name)
+			}
+			names = append(names, n.Name)
+		}
+	}
+	return names, nil
 }
 
 // receiverTypeName returns the name of fn's receiver type (value or pointer),

@@ -132,26 +132,36 @@ func Main() {
 	}
 }
 
-func TestFile_NullaryCallWithArgsErrors(t *testing.T) {
+// TestFile_CallWithArgsEmits: bare-identifier calls with arguments are now
+// supported (0.3.1) — see TestModule_CallWithArgs and
+// TestModule_SelfRecursionEmits — so this no longer errors.
+func TestFile_CallWithArgsEmits(t *testing.T) {
 	src := `package m
 func Boot() { Helper("x") }
+func Helper(S string) {}
 `
-	_, _, err := File(src)
-	if err == nil {
-		t.Fatal("want error for bare-identifier call with arguments, got nil")
+	got, _, err := File(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(got, `helper(<<"x">>)`) {
+		t.Fatalf("want helper call with argument, got:\n%s", got)
 	}
 }
 
+// TestFile_FunctionWithParamsErrors: parameters are now supported (0.3.1), but
+// a lowercase-leading name is still rejected since it would become an
+// invalid (lowercase) Erlang variable — see TestModule_LowercaseParamRejected.
 func TestFile_FunctionWithParamsErrors(t *testing.T) {
 	src := `package m
 func Boot(x string) {}
 `
 	_, _, err := File(src)
 	if err == nil {
-		t.Fatal("want error for function with parameters, got nil")
+		t.Fatal("want error for lowercase-leading parameter, got nil")
 	}
-	if !strings.Contains(err.Error(), "0.2.x roadmap") {
-		t.Fatalf("error should point at the roadmap, got: %v", err)
+	if !strings.Contains(err.Error(), "uppercase") {
+		t.Fatalf("error should point at the uppercase requirement, got: %v", err)
 	}
 }
 
@@ -612,5 +622,219 @@ func Main() { otp.CallGlobal("echo") }
 `
 	if _, err := Module(src); err == nil {
 		t.Fatal("expected positioned arity error, got nil")
+	}
+}
+
+func TestModule_ParamHeadAndArity(t *testing.T) {
+	src := `package demo
+import "go.muehmer.eu/wintermute/pkg/otp"
+func Greet(Name string) { otp.Print(Name) }`
+	r, err := Module(src)
+	if err != nil {
+		t.Fatalf("Module: %v", err)
+	}
+	if !strings.Contains(r.Erl, "-export([greet/1]).") {
+		t.Errorf("want export greet/1, got:\n%s", r.Erl)
+	}
+	if !strings.Contains(r.Erl, "greet(Name) ->") {
+		t.Errorf("want clause head greet(Name), got:\n%s", r.Erl)
+	}
+}
+
+func TestModule_LowercaseParamRejected(t *testing.T) {
+	src := `package demo
+import "go.muehmer.eu/wintermute/pkg/otp"
+func Greet(name string) { otp.Print(name) }`
+	_, err := Module(src)
+	if err == nil || !strings.Contains(err.Error(), "uppercase") {
+		t.Fatalf("want uppercase-param error, got %v", err)
+	}
+}
+
+func TestModule_TrailingReturn(t *testing.T) {
+	src := `package math
+func Add(X, Y int) int { return X + Y }`
+	r, err := Module(src)
+	if err != nil {
+		t.Fatalf("Module: %v", err)
+	}
+	if !strings.Contains(r.Erl, "add(X, Y) -> X + Y.") {
+		t.Errorf("want add(X, Y) -> X + Y, got:\n%s", r.Erl)
+	}
+}
+
+func TestModule_EarlyReturnRejected(t *testing.T) {
+	src := `package demo
+import "go.muehmer.eu/wintermute/pkg/otp"
+func F(X int) int { return X
+	otp.Print("unreached") }`
+	_, err := Module(src)
+	if err == nil || !strings.Contains(err.Error(), "case") {
+		t.Fatalf("want early-return error pointing at case/0.3.2, got %v", err)
+	}
+}
+
+func TestModule_ReturnBeforeReceiveRejected(t *testing.T) {
+	src := `package demo
+import "go.muehmer.eu/wintermute/pkg/otp"
+type Msg struct { X int }
+func F(Y int) int {
+	return Y
+	M := otp.Receive().(Msg)
+	otp.Print("after")
+}`
+	_, err := Module(src)
+	if err == nil || !strings.Contains(err.Error(), "early return") {
+		t.Fatalf("want early-return rejection, got %v", err)
+	}
+}
+
+// A return as the last statement of a receive clause body is a legitimate
+// trailing return (the clause body is the function's tail): it must be accepted
+// and emit the returned expression as the clause value. This is the positive
+// counterpart to TestModule_ReturnBeforeReceiveRejected — the exact boundary the
+// isTail fix guards.
+func TestModule_ReturnInReceiveClauseBody(t *testing.T) {
+	src := `package demo
+import "go.muehmer.eu/wintermute/pkg/otp"
+type Msg struct { X int }
+func Handle() int {
+	M := otp.Receive().(Msg)
+	return M.X
+}`
+	r, err := Module(src)
+	if err != nil {
+		t.Fatalf("Module: %v", err)
+	}
+	if !strings.Contains(r.Erl, "{msg, X} ->") || !strings.Contains(r.Erl, "\n            X\n") {
+		t.Errorf("want receive clause {msg, X} -> X, got:\n%s", r.Erl)
+	}
+}
+
+// A function parameter sharing a name with a receive-pattern field must be
+// rejected: in Erlang a pattern variable that is already bound is an equality
+// match, not a fresh binding, so silently reusing the param would change the
+// receive's semantics instead of erroring.
+func TestModule_ParamCollidesWithReceiveField(t *testing.T) {
+	src := `package demo
+import "go.muehmer.eu/wintermute/pkg/otp"
+type Msg struct { X int }
+func Handle(X int) int {
+	M := otp.Receive().(Msg)
+	return X
+}`
+	_, err := Module(src)
+	if err == nil || !strings.Contains(err.Error(), "collides") {
+		t.Fatalf("want collision rejection, got %v", err)
+	}
+}
+
+// A later `:=` binding that reuses a receive-pattern field name must be
+// rejected by the same rebinding guard that already covers param/param and
+// binding/binding collisions.
+func TestModule_BindingCollidesWithReceiveField(t *testing.T) {
+	src := `package demo
+import "go.muehmer.eu/wintermute/pkg/otp"
+type Msg struct { X int }
+func Handle(Y int) int {
+	M := otp.Receive().(Msg)
+	X := Y
+	return X
+}`
+	_, err := Module(src)
+	if err == nil || !strings.Contains(err.Error(), "already bound") {
+		t.Fatalf("want rebinding rejection, got %v", err)
+	}
+}
+
+func TestModule_LocalBinding(t *testing.T) {
+	src := `package math
+func Add(X, Y int) int {
+	Z := X + Y
+	return Z
+}`
+	r, err := Module(src)
+	if err != nil {
+		t.Fatalf("Module: %v", err)
+	}
+	if !strings.Contains(r.Erl, "Z = X + Y") {
+		t.Errorf("want binding Z = X + Y, got:\n%s", r.Erl)
+	}
+	if !strings.Contains(r.Erl, "Z = X + Y,\n    Z.") {
+		t.Errorf("want Z bound then returned, got:\n%s", r.Erl)
+	}
+}
+
+func TestModule_ReassignmentRejected(t *testing.T) {
+	src := `package math
+func F(X int) int {
+	X = X + 1
+	return X
+}`
+	_, err := Module(src)
+	if err == nil || !strings.Contains(err.Error(), "immutable") {
+		t.Fatalf("want immutability error, got %v", err)
+	}
+}
+
+func TestModule_RebindingRejected(t *testing.T) {
+	src := `package math
+func F(X int) int {
+	X := X
+	return X
+}`
+	_, err := Module(src)
+	if err == nil || !strings.Contains(err.Error(), "already bound") {
+		t.Fatalf("want already-bound error, got %v", err)
+	}
+}
+
+func TestModule_LowercaseBindingRejected(t *testing.T) {
+	src := `package math
+func F(X int) int {
+	z := X
+	return z
+}`
+	_, err := Module(src)
+	if err == nil || !strings.Contains(err.Error(), "uppercase") {
+		t.Fatalf("want uppercase error, got %v", err)
+	}
+}
+
+// An unnamed parameter (valid Go: `func F(int, string) int`) has no name to
+// become an Erlang variable, and silently dropping it from the parameter list
+// would emit the wrong arity (f/0 instead of f/2) — reject it instead.
+func TestModule_UnnamedParamRejected(t *testing.T) {
+	src := `package demo
+func F(int, string) int { return 1 }`
+	_, err := Module(src)
+	if err == nil || !strings.Contains(err.Error(), "unnamed") {
+		t.Fatalf("want unnamed-parameter rejection, got %v", err)
+	}
+}
+
+func TestModule_CallWithArgs(t *testing.T) {
+	src := `package math
+func Double(X int) int { return Add(X, X) }
+func Add(X, Y int) int { return X + Y }`
+	r, err := Module(src)
+	if err != nil {
+		t.Fatalf("Module: %v", err)
+	}
+	if !strings.Contains(r.Erl, "double(X) -> add(X, X).") {
+		t.Errorf("want double(X) -> add(X, X), got:\n%s", r.Erl)
+	}
+}
+
+func TestModule_SelfRecursionEmits(t *testing.T) {
+	// Recursion mechanism only; a real base case needs case/if (0.3.2).
+	src := `package loop
+func Spin(X int) int { return Spin(X) }`
+	r, err := Module(src)
+	if err != nil {
+		t.Fatalf("Module: %v", err)
+	}
+	if !strings.Contains(r.Erl, "spin(X) -> spin(X).") {
+		t.Errorf("want spin(X) -> spin(X), got:\n%s", r.Erl)
 	}
 }
