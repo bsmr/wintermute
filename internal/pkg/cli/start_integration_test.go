@@ -15,17 +15,17 @@ import (
 	"go.muehmer.eu/wintermute/internal/pkg/erlang"
 )
 
-// TestStartBootsAppEndToEnd drives the real `wm start` path — unmocked, against
-// the locally installed OTP — to prove the whole start→status→call flow works.
+// TestReleaseStartCallStopEndToEnd drives the real two-step 0.2.5 flow — unmocked,
+// against the locally installed OTP: `wm release` builds a formal OTP release,
+// `wm start <dir>` boots it from the generated boot script (no -eval), and
+// status/call/stop drive it over Distributed Erlang.
 //
-// This is the regression guard for the bug where startCmd never emitted
-// <app>.app: because the node boots -detached, erl exits 0 regardless of the
-// -eval result, so `wm start` printed false success while application:start
-// silently failed with {error,{"no such file or directory","echoapp.app"}}. The
-// test asserts (a) echoapp.app lands on disk, (b) echoapp shows up in the node's
-// running applications, and (c) `wm call echo hello` really reaches the
-// {global, echo} gen_server and echoes back "hello".
-func TestStartBootsAppEndToEnd(t *testing.T) {
+// It asserts (a) `wm release` emits wm.json + the boot script on disk, (b) after
+// `wm start <dir>` echoapp shows up in the node's running applications, (c)
+// `wm call --app echoapp echo hello` reaches the {global, echo} gen_server and
+// echoes "hello", and (d) `wm stop` removes the State-File. The cookie reaches
+// the node via a 0o600 -args_file run-file, never on argv.
+func TestReleaseStartCallStopEndToEnd(t *testing.T) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		t.Fatal(err)
@@ -38,6 +38,7 @@ func TestStartBootsAppEndToEnd(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 
 	out := t.TempDir()
+	vsn := "0.2.5"
 	node := fmt.Sprintf("wmstart_e2e_%d@127.0.0.1", os.Getpid())
 	fixtures := []string{
 		"../../../testdata/persistent/go/echoapp/main.go",
@@ -54,18 +55,30 @@ func TestStartBootsAppEndToEnd(t *testing.T) {
 		_ = Run(ctx, []string{"stop", "echoapp"}, strings.NewReader(""), &sink, io.Discard)
 	})
 
-	// 1. wm start — the real deal: transpile + erlc + detached boot + .app emit.
-	startArgs := append([]string{"start", "--name", node, "--out", out}, fixtures...)
-	var startOut strings.Builder
-	if err := Run(ctx, startArgs, strings.NewReader(""), &startOut, io.Discard); err != nil {
-		t.Fatalf("wm start: %v", err)
+	// 1. wm release — transpile + erlc into the lib layout, emit resources, and
+	// generate the boot script via systools. --name pins a unique node name into
+	// wm.json so repeated runs never collide on epmd.
+	releaseArgs := append([]string{"release", "--out", out, "--vsn", vsn, "--name", node}, fixtures...)
+	var releaseOut strings.Builder
+	if err := Run(ctx, releaseArgs, strings.NewReader(""), &releaseOut, io.Discard); err != nil {
+		t.Fatalf("wm release: %v", err)
 	}
-	appFile := filepath.Join(out, "echoapp.app")
-	if _, err := os.Stat(appFile); err != nil {
-		t.Fatalf("echoapp.app not emitted at %s: %v", appFile, err)
+	for _, want := range []string{
+		"wm.json",
+		filepath.Join("releases", vsn, "echoapp.boot"),
+	} {
+		if _, err := os.Stat(filepath.Join(out, want)); err != nil {
+			t.Fatalf("wm release did not emit %s: %v", want, err)
+		}
 	}
 
-	// 2. Poll wm status until echoapp appears in the running applications. After
+	// 2. wm start <release-dir> — boot the finished release detached.
+	var startOut strings.Builder
+	if err := Run(ctx, []string{"start", out}, strings.NewReader(""), &startOut, io.Discard); err != nil {
+		t.Fatalf("wm start: %v", err)
+	}
+
+	// 3. Poll wm status until echoapp appears in the running applications. After
 	// a detached boot, application/global registration is not instant.
 	var lastStatus string
 	running := false
@@ -84,7 +97,7 @@ func TestStartBootsAppEndToEnd(t *testing.T) {
 		t.Fatalf("echoapp never appeared in running applications (expected {echoapp, in status); last status:\n%s", lastStatus)
 	}
 
-	// 3. wm call — proves {global, echo} really registered on the started node.
+	// 4. wm call — proves {global, echo} really registered on the started node.
 	var callOut strings.Builder
 	if err := Run(ctx, []string{"call", "--app", "echoapp", "echo", "hello"},
 		strings.NewReader(""), &callOut, io.Discard); err != nil {
@@ -94,15 +107,16 @@ func TestStartBootsAppEndToEnd(t *testing.T) {
 		t.Fatalf("wm call echo hello = %q, want %q", got, "hello")
 	}
 
-	// 4. wm stop — the node goes down and the State-File is removed.
+	// 5. wm stop — the node goes down and the State-File is removed.
 	var stopOut strings.Builder
 	if err := Run(ctx, []string{"stop", "echoapp"}, strings.NewReader(""), &stopOut, io.Discard); err != nil {
 		t.Fatalf("wm stop: %v", err)
 	}
-	if _, err := statePath("echoapp"); err != nil {
+	p, err := statePath("echoapp")
+	if err != nil {
 		t.Fatal(err)
 	}
-	if p, _ := statePath("echoapp"); fileExists(p) {
+	if fileExists(p) {
 		t.Fatalf("State-File %s still present after stop", p)
 	}
 }

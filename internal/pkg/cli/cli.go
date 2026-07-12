@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"go.muehmer.eu/wintermute/internal/pkg/erlang"
+	"go.muehmer.eu/wintermute/internal/pkg/release"
 	"go.muehmer.eu/wintermute/internal/pkg/transpile"
 )
 
@@ -33,17 +34,18 @@ func validNodeName(s string) bool { return nodeRE.MatchString(s) }
 // the rest are stubs for now.
 // ponytail: single stub dispatcher; give each command a real handler when it does something.
 var commands = map[string]string{
-	"build":  "transpile Go source to Erlang",
-	"run":    "transpile and run directly",
-	"start":  "start a persistent node hosting an OTP application",
-	"stop":   "stop a running node and clear its State-File",
-	"status": "ping a running node and list its applications",
-	"call":   "call a globally-registered gen_server on a running node",
-	"attach": "interactive erl -remsh to the running node",
-	"check":  "type-check and analyse",
-	"new":    "scaffold a new project",
-	"repl":   "start an interactive REPL (Erlang shell)",
-	"erlang": "manage local Erlang/OTP toolchains (install|list)",
+	"build":   "transpile Go source to Erlang",
+	"release": "build the on-disk OTP release tree",
+	"run":     "transpile and run directly",
+	"start":   "start a persistent node hosting an OTP application",
+	"stop":    "stop a running node and clear its State-File",
+	"status":  "ping a running node and list its applications",
+	"call":    "call a globally-registered gen_server on a running node",
+	"attach":  "interactive erl -remsh to the running node",
+	"check":   "type-check and analyse",
+	"new":     "scaffold a new project",
+	"repl":    "start an interactive REPL (Erlang shell)",
+	"erlang":  "manage local Erlang/OTP toolchains (install|list)",
 }
 
 // Run dispatches a wm subcommand. All I/O is injected for testability.
@@ -62,6 +64,8 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 	switch cmd {
 	case "build":
 		return buildCmd(args[1:], stdout)
+	case "release":
+		return releaseCmd(ctx, args[1:], stdout)
 	case "run":
 		return runCmd(ctx, args[1:], stdout)
 	case "start":
@@ -84,7 +88,7 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 func usage(w io.Writer) {
 	fmt.Fprintln(w, "usage: wm <command> [args]")
 	fmt.Fprintln(w, "\ncommands:")
-	for _, name := range []string{"build", "run", "start", "stop", "status", "call", "attach", "check", "new", "repl", "erlang"} {
+	for _, name := range []string{"build", "release", "run", "start", "stop", "status", "call", "attach", "check", "new", "repl", "erlang"} {
 		fmt.Fprintf(w, "  %-7s %s\n", name, commands[name])
 	}
 }
@@ -265,93 +269,89 @@ func parseVersionFlag(args []string) (string, []string, error) {
 	return version, rest, nil
 }
 
-// startCmd transpiles + compiles the given Go sources inline, boots a detached,
-// named Erlang node running application:start(<app>), and records the node in a
-// State-File so stop/status/call/attach can find it with no args.
+// startCmd boots a finished release directory (built by `wm release`): it
+// reads the release's wm.json manifest for app/vsn/node, generates a fresh
+// cookie kept off argv (written to a 0o600 run-file under the state dir and
+// loaded via -args_file), boots a detached Erlang node from the release's
+// boot script, and records the node in a State-File so stop/status/call/attach
+// can find it with no args.
 func startCmd(ctx context.Context, args []string, stdout io.Writer) error {
-	name, rest, err := parseStringFlag(args, "--name", "")
-	if err != nil {
-		return err
-	}
-	// Validate an explicit --name override up front, before any transpile/erlc
-	// work runs: the value later gets spliced unquoted into stop/status/attach
-	// `erl -eval` strings, so a crafted override must never reach that far.
-	if name != "" && !validNodeName(name) {
-		return fmt.Errorf("invalid node name %q (must match name@host)", name)
-	}
-	version, rest, err := parseVersionFlag(rest)
+	version, rest, err := parseVersionFlag(args)
 	if err != nil {
 		return err
 	}
 	if err := erlang.ValidateVersion(version); err != nil {
 		return err
 	}
-	vsn, rest, err := parseVsnFlag(rest)
+	if len(rest) != 1 {
+		return fmt.Errorf("usage: wm start <release-dir> [--version X]")
+	}
+	dir := rest[0]
+	data, err := os.ReadFile(filepath.Join(dir, "wm.json"))
 	if err != nil {
-		return err
+		return fmt.Errorf("not a release dir (%s): missing wm.json; run wm release first", dir)
 	}
-	out, rest, err := parseOutFlag(rest)
+	m, err := release.ParseManifest(data)
 	if err != nil {
-		return err
+		return fmt.Errorf("corrupt wm.json in %s: %w", dir, err)
 	}
-	if len(rest) == 0 {
-		return fmt.Errorf("usage: wm start <path>... [--name N] [--out DIR] [--version X] [--vsn V]")
+	// The node name is read from wm.json, not a CLI flag, but it later gets
+	// spliced unquoted into stop/status/call/attach `erl -eval` strings, so a
+	// crafted manifest must never reach the boot invocation.
+	if !validNodeName(m.Node) {
+		return fmt.Errorf("invalid node name %q in wm.json", m.Node)
 	}
-	if err := os.MkdirAll(out, 0o755); err != nil {
-		return err
+	// App and Vsn are likewise spliced unquoted into filesystem paths below
+	// (relDir/boot/sysConfig/relVmArgs, and the cookie run-file under the
+	// state dir), so a crafted manifest carrying "../" must be rejected
+	// before any path is constructed or any file is written.
+	if !validAppName(m.App) {
+		return fmt.Errorf("invalid app name %q in wm.json", m.App)
 	}
-	appMod, modules, registered, err := buildApp(rest, out)
-	if err != nil {
-		return err
+	if !validAppName(m.Vsn) {
+		return fmt.Errorf("invalid vsn %q in wm.json", m.Vsn)
 	}
-	if appMod == "" {
-		return fmt.Errorf("no application module among %v; wm start needs one", rest)
-	}
-	// Emit <app>.app onto the code path so application:start(<app>) can find its
-	// resource file when the detached node boots. Unlike `wm build`, start is a
-	// run action, not a release build, so a missing VERSION is not fatal: fall
-	// back to 0.0.0 rather than erroring.
-	if vsn == "" {
-		if v, verr := readVersion(); verr == nil {
-			vsn = v
-		} else {
-			vsn = "0.0.0"
-		}
-	}
-	appFile := filepath.Join(out, appMod+".app")
-	body := transpile.AppResource(appMod, vsn, modules, registered)
-	if err := os.WriteFile(appFile, []byte(body), 0o644); err != nil {
-		return err
-	}
-	home, _ := os.UserHomeDir()
-	l := erlang.NewLayout(home, version)
-	for _, m := range modules {
-		if err := runErl(ctx, ".", l.Erlc(), "-o", out, outPath(out, m)); err != nil {
-			return err
-		}
-	}
-	if name == "" {
-		name = appMod + "@127.0.0.1"
-	}
-	// Validate whether the name came from --name or the default: it later gets
-	// spliced unquoted into stop/status/attach `erl -eval` strings, so the
-	// invariant must hold regardless of where the value originated.
-	if !validNodeName(name) {
-		return fmt.Errorf("invalid node name %q (must match name@host)", name)
-	}
+	relDir := filepath.Join(dir, "releases", m.Vsn)
+	boot := filepath.Join(relDir, m.App)
+	sysConfig := filepath.Join(relDir, "sys.config")
+	relVmArgs := filepath.Join(relDir, "vm.args")
+
+	// Generate a fresh cookie and write it to a 0o600 run-file loaded via
+	// -args_file: the cookie must never appear on argv (visible via /proc or
+	// `ps`) and never be baked into the release tree itself.
 	cookie, err := newCookie()
 	if err != nil {
 		return err
 	}
-	eval := fmt.Sprintf("application:start(%s)", appMod)
-	if err := runErl(ctx, ".", l.Erl(), "-detached", "-name", name,
-		"-setcookie", cookie, "-pa", out, "-eval", eval); err != nil {
+	sd, err := stateDir()
+	if err != nil {
 		return err
 	}
-	if err := writeState(appMod, NodeState{Node: name, Cookie: cookie, CodePath: out}); err != nil {
+	if err := os.MkdirAll(sd, 0o700); err != nil {
 		return err
 	}
-	fmt.Fprintf(stdout, "started %s (%s)\n", appMod, name)
+	runVmArgs := filepath.Join(sd, m.App+".vmargs")
+	if err := os.WriteFile(runVmArgs, []byte("-setcookie "+cookie+"\n"), 0o600); err != nil {
+		return err
+	}
+	// WriteFile's mode only applies on creation; O_TRUNC over a pre-existing file
+	// keeps its (possibly looser) permissions. Chmod unconditionally so the
+	// RCE-grade cookie is owner-only even if a stale run-file was left behind.
+	if err := os.Chmod(runVmArgs, 0o600); err != nil {
+		return err
+	}
+
+	home, _ := os.UserHomeDir()
+	l := erlang.NewLayout(home, version)
+	if err := runErl(ctx, ".", l.Erl(), "-detached",
+		"-boot", boot, "-config", sysConfig,
+		"-args_file", relVmArgs, "-args_file", runVmArgs); err != nil {
+		return err
+	}
+	if err := writeState(m.App, NodeState{Node: m.Node, Cookie: cookie, CodePath: dir}); err != nil {
+		return err
+	}
+	fmt.Fprintf(stdout, "started %s (%s)\n", m.App, m.Node)
 	return nil
 }
 

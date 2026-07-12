@@ -50,13 +50,14 @@ wm new myproject
 # Start an interactive REPL (Erlang shell)
 wm repl
 
-# Start a persistent node hosting an OTP application
-wm start echo_app.go echo_sup.go echo_server.go
+# Build and start a persistent node hosting an OTP application
+wm release echo_app.go echo_sup.go echo_server.go --out build/echo
+wm start build/echo
 
-wm status              # is it up? which apps run?
-wm call echo "hi"      # cross-node gen_server:call({global, echo}, ...)
-wm attach              # interactive remote shell (detach leaves it running)
-wm stop                # clean shutdown
+wm status echo         # is it up? which apps run?
+wm call --app echo echo hello  # cross-node gen_server:call({global, echo}, ...)
+wm attach echo         # interactive remote shell (detach leaves it running)
+wm stop echo           # clean shutdown
 ```
 
 ---

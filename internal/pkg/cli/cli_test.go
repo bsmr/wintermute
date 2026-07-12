@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"go.muehmer.eu/wintermute/internal/pkg/erlang"
+	"go.muehmer.eu/wintermute/internal/pkg/release"
 )
 
 func TestRun(t *testing.T) {
@@ -39,6 +40,14 @@ func TestRun(t *testing.T) {
 				t.Fatalf("stdout = %q, want substring %q", out.String(), tt.wantOut)
 			}
 		})
+	}
+}
+
+func TestUsageListsRelease(t *testing.T) {
+	var buf bytes.Buffer
+	_ = Run(context.Background(), []string{}, strings.NewReader(""), &buf, &buf)
+	if !strings.Contains(buf.String(), "release") {
+		t.Errorf("usage should list the release command:\n%s", buf.String())
 	}
 }
 
@@ -133,44 +142,118 @@ func TestBuildOutFlagAndCollision(t *testing.T) {
 	}
 }
 
-func TestStartAssemblesDetachedErlAndWritesState(t *testing.T) {
-	// Mirror the app fixture shape from testdata/otpapp/go/echoapp/main.go.
-	// Read it before t.Chdir below, since the path is relative to the package dir.
-	appSrc, err := os.ReadFile("../../../testdata/otpapp/go/echoapp/main.go")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Chdir(t.TempDir())
-	t.Setenv("HOME", t.TempDir())
-	t.Setenv("XDG_STATE_HOME", t.TempDir())
+// TestStartBootsReleaseDir replaces the old TestStartAssemblesDetachedErlAndWritesState:
+// as of 0.2.5, `wm start` boots a finished release directory (built by `wm
+// release`) instead of transpiling sources inline.
+func TestStartBootsReleaseDir(t *testing.T) {
+	// Build a minimal release dir by hand (no systools needed for the unit test).
 	dir := t.TempDir()
-	src := filepath.Join(dir, "main.go")
-	os.WriteFile(src, appSrc, 0o644)
+	relDir := filepath.Join(dir, "releases", "0.2.5")
+	os.MkdirAll(relDir, 0o755)
+	os.WriteFile(filepath.Join(relDir, "echo.boot"), []byte("BOOT"), 0o644)
+	os.WriteFile(filepath.Join(relDir, "sys.config"), []byte("[{echo, []}].\n"), 0o644)
+	os.WriteFile(filepath.Join(relDir, "vm.args"), []byte("-name echo@127.0.0.1\n"), 0o644)
+	man := `{"app":"echo","vsn":"0.2.5","node":"echo@127.0.0.1"}`
+	os.WriteFile(filepath.Join(dir, "wm.json"), []byte(man), 0o644)
 
-	var cmds []string
+	// Redirect the state dir into the test tmp.
+	t.Setenv("XDG_STATE_HOME", filepath.Join(t.TempDir(), "state"))
+
+	var gotArgs []string
+	orig := runErl
 	runErl = func(_ context.Context, _, name string, a ...string) error {
-		cmds = append(cmds, name+" "+strings.Join(a, " "))
+		if strings.HasSuffix(name, "erl") {
+			gotArgs = a
+		}
 		return nil
 	}
-	defer func() { runErl = execRunner }()
+	t.Cleanup(func() { runErl = orig })
 
-	var out strings.Builder
-	if err := Run(context.Background(), []string{"start", "--out", t.TempDir(), src},
-		strings.NewReader(""), &out, io.Discard); err != nil {
-		t.Fatal(err)
+	if err := startCmd(context.Background(), []string{dir}, &bytes.Buffer{}); err != nil {
+		t.Fatalf("startCmd: %v", err)
 	}
-	last := cmds[len(cmds)-1]
-	for _, want := range []string{"-detached", "-name echoapp@127.0.0.1", "-setcookie ", "application:start(echoapp)"} {
-		if !strings.Contains(last, want) {
-			t.Fatalf("erl cmd missing %q:\n%s", want, last)
+
+	joined := strings.Join(gotArgs, " ")
+	for _, want := range []string{"-detached", "-boot", "-config", "-args_file"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("boot argv missing %q: %v", want, gotArgs)
 		}
 	}
-	st, err := readState("echoapp")
-	if err != nil {
-		t.Fatalf("state not written: %v", err)
+	if !strings.Contains(joined, filepath.Join(relDir, "echo")) {
+		t.Errorf("boot argv missing -boot path: %v", gotArgs)
 	}
-	if st.Node != "echoapp@127.0.0.1" || st.Cookie == "" {
-		t.Fatalf("bad state: %+v", st)
+
+	// Cookie run-file exists, is 0o600, carries -setcookie, never on argv.
+	sd := filepath.Join(os.Getenv("XDG_STATE_HOME"), "wintermute")
+	rf := filepath.Join(sd, "echo.vmargs")
+	fi, err := os.Stat(rf)
+	if err != nil {
+		t.Fatalf("cookie run-file missing: %v", err)
+	}
+	if fi.Mode().Perm() != 0o600 {
+		t.Errorf("run-file mode = %o, want 600", fi.Mode().Perm())
+	}
+	body, _ := os.ReadFile(rf)
+	if !strings.Contains(string(body), "-setcookie") {
+		t.Errorf("run-file missing -setcookie: %s", body)
+	}
+	if strings.Contains(joined, "-setcookie") {
+		t.Errorf("cookie must NOT appear on argv: %v", gotArgs)
+	}
+}
+
+// TestStartRunFileForced0600 guards that a pre-existing (stale, loose-perm) cookie
+// run-file is forced back to 0o600: WriteFile's mode only applies on creation, so
+// an O_TRUNC write over a 0o644 file would otherwise keep the RCE-grade cookie
+// world-readable.
+func TestStartRunFileForced0600(t *testing.T) {
+	dir := t.TempDir()
+	relDir := filepath.Join(dir, "releases", "0.2.5")
+	os.MkdirAll(relDir, 0o755)
+	os.WriteFile(filepath.Join(relDir, "echo.boot"), []byte("BOOT"), 0o644)
+	os.WriteFile(filepath.Join(relDir, "sys.config"), []byte("[{echo, []}].\n"), 0o644)
+	os.WriteFile(filepath.Join(relDir, "vm.args"), []byte("-name echo@127.0.0.1\n"), 0o644)
+	os.WriteFile(filepath.Join(dir, "wm.json"), []byte(`{"app":"echo","vsn":"0.2.5","node":"echo@127.0.0.1"}`), 0o644)
+
+	state := filepath.Join(t.TempDir(), "state")
+	t.Setenv("XDG_STATE_HOME", state)
+	// Pre-create a stale run-file with loose 0o644 perms.
+	sd := filepath.Join(state, "wintermute")
+	if err := os.MkdirAll(sd, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	rf := filepath.Join(sd, "echo.vmargs")
+	if err := os.WriteFile(rf, []byte("-setcookie stale\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	orig := runErl
+	runErl = func(_ context.Context, _, _ string, _ ...string) error { return nil }
+	t.Cleanup(func() { runErl = orig })
+
+	if err := startCmd(context.Background(), []string{dir}, &bytes.Buffer{}); err != nil {
+		t.Fatalf("startCmd: %v", err)
+	}
+	fi, err := os.Stat(rf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi.Mode().Perm() != 0o600 {
+		t.Fatalf("stale run-file mode = %o after start, want 600", fi.Mode().Perm())
+	}
+}
+
+// TestStartMissingManifestErrors replaces TestStartNoAppModuleErrors: `wm
+// start` no longer detects application modules from sources — instead it
+// requires a release dir with a wm.json manifest (written by `wm release`).
+func TestStartMissingManifestErrors(t *testing.T) {
+	dir := t.TempDir() // no wm.json here
+	err := startCmd(context.Background(), []string{dir}, &bytes.Buffer{})
+	if err == nil {
+		t.Fatal("want error for release dir missing wm.json, got nil")
+	}
+	if !strings.Contains(err.Error(), "wm.json") {
+		t.Fatalf("err = %q, want substring 'wm.json'", err.Error())
 	}
 }
 
@@ -375,53 +458,6 @@ func TestParseStringFlag(t *testing.T) {
 	}
 }
 
-func TestStartNameOverride(t *testing.T) {
-	// Read app fixture before t.Chdir, since path is relative to package dir.
-	appSrc, err := os.ReadFile("../../../testdata/otpapp/go/echoapp/main.go")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Chdir(t.TempDir())
-	t.Setenv("HOME", t.TempDir())
-	t.Setenv("XDG_STATE_HOME", t.TempDir())
-	dir := t.TempDir()
-	src := filepath.Join(dir, "main.go")
-	os.WriteFile(src, appSrc, 0o644)
-
-	var cmds []string
-	runErl = func(_ context.Context, _, name string, a ...string) error {
-		cmds = append(cmds, name+" "+strings.Join(a, " "))
-		return nil
-	}
-	defer func() { runErl = execRunner }()
-
-	var out strings.Builder
-	outDir := t.TempDir()
-	if err := Run(context.Background(), []string{"start", "--name", "echo@myhost", "--out", outDir, src},
-		strings.NewReader(""), &out, io.Discard); err != nil {
-		t.Fatal(err)
-	}
-
-	// Assert the last erl command contains the override name
-	last := cmds[len(cmds)-1]
-	if !strings.Contains(last, "-name echo@myhost") {
-		t.Fatalf("erl cmd missing '-name echo@myhost':\n%s", last)
-	}
-	// Assert it doesn't contain the default
-	if strings.Contains(last, "echoapp@127.0.0.1") {
-		t.Fatalf("erl cmd should not contain default 'echoapp@127.0.0.1':\n%s", last)
-	}
-
-	// Assert state file has the override name
-	st, err := readState("echoapp")
-	if err != nil {
-		t.Fatalf("state not written: %v", err)
-	}
-	if st.Node != "echo@myhost" {
-		t.Fatalf("state.Node = %q, want 'echo@myhost'", st.Node)
-	}
-}
-
 func TestStopAssemblesRpcAndRemovesState(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
@@ -447,32 +483,6 @@ func TestStopAssemblesRpcAndRemovesState(t *testing.T) {
 	}
 	if _, err := readState("echoapp"); err == nil {
 		t.Fatal("state should be removed after stop")
-	}
-}
-
-func TestStartNoAppModuleErrors(t *testing.T) {
-	t.Chdir(t.TempDir())
-	t.Setenv("HOME", t.TempDir())
-	t.Setenv("XDG_STATE_HOME", t.TempDir())
-	dir := t.TempDir()
-	src := filepath.Join(dir, "main.go")
-	// Create a plain package with no App type (no application module)
-	os.WriteFile(src, []byte("package plainmod\nfunc Main() {}\n"), 0o644)
-
-	runErl = func(_ context.Context, _, name string, a ...string) error {
-		return nil
-	}
-	defer func() { runErl = execRunner }()
-
-	var out strings.Builder
-	err := Run(context.Background(), []string{"start", "--out", t.TempDir(), src},
-		strings.NewReader(""), &out, io.Discard)
-
-	if err == nil {
-		t.Fatal("want error for non-application module, got nil")
-	}
-	if !strings.Contains(err.Error(), "no application module") {
-		t.Fatalf("err = %q, want substring 'no application module'", err.Error())
 	}
 }
 
@@ -657,17 +667,23 @@ func TestCallRejectsInvalidGenServerName(t *testing.T) {
 	}
 }
 
+// TestStartRejectsInvalidNodeName preserves the security property from 0.2.4:
+// a crafted node name must never reach the boot invocation. In 0.2.5 the node
+// name comes from the release's wm.json (not a --name flag), so this builds a
+// release dir whose manifest carries a malicious node and asserts startCmd
+// rejects it via validNodeName(m.Node) before erl is ever invoked.
 func TestStartRejectsInvalidNodeName(t *testing.T) {
-	appSrc, err := os.ReadFile("../../../testdata/otpapp/go/echoapp/main.go")
+	dir := t.TempDir()
+	relDir := filepath.Join(dir, "releases", "0.2.5")
+	os.MkdirAll(relDir, 0o755)
+	man := release.Manifest{App: "echo", Vsn: "0.2.5", Node: `x@h'), os:cmd("id`}
+	data, err := man.Marshal()
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Chdir(t.TempDir())
-	t.Setenv("HOME", t.TempDir())
+	os.WriteFile(filepath.Join(dir, "wm.json"), data, 0o644)
+
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
-	dir := t.TempDir()
-	src := filepath.Join(dir, "main.go")
-	os.WriteFile(src, appSrc, 0o644)
 
 	called := false
 	runErl = func(_ context.Context, _, name string, a ...string) error {
@@ -676,17 +692,91 @@ func TestStartRejectsInvalidNodeName(t *testing.T) {
 	}
 	defer func() { runErl = execRunner }()
 
-	var out strings.Builder
-	err = Run(context.Background(), []string{"start", "--name", `x@h'), os:cmd("id`, "--out", t.TempDir(), src},
-		strings.NewReader(""), &out, io.Discard)
+	err = startCmd(context.Background(), []string{dir}, &bytes.Buffer{})
 	if err == nil {
-		t.Fatal("want error for invalid --name, got nil")
+		t.Fatal("want error for invalid node name in wm.json, got nil")
 	}
 	if !strings.Contains(err.Error(), "invalid node name") {
 		t.Fatalf("err = %q, want substring 'invalid node name'", err.Error())
 	}
 	if called {
-		t.Fatal("erl must not be invoked when --name fails validation")
+		t.Fatal("erl must not be invoked when the manifest node name fails validation")
+	}
+}
+
+// TestStartRejectsTraversalAppName is a regression test for a critical
+// path-traversal finding: a crafted App field in wm.json (e.g.
+// "../../../../tmp/pwn") reached filesystem paths (relDir/boot and the
+// cookie run-file) before any validation ran, letting `wm start` write a
+// file outside the state dir. startCmd must reject it before erl is invoked
+// and before any run-file is written.
+func TestStartRejectsTraversalAppName(t *testing.T) {
+	dir := t.TempDir()
+	relDir := filepath.Join(dir, "releases", "0.2.5")
+	os.MkdirAll(relDir, 0o755)
+	man := release.Manifest{App: "../../../../tmp/pwn", Vsn: "0.2.5", Node: "echo@127.0.0.1"}
+	data, err := man.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.WriteFile(filepath.Join(dir, "wm.json"), data, 0o644)
+
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+
+	called := false
+	runErl = func(_ context.Context, _, name string, a ...string) error {
+		called = true
+		return nil
+	}
+	defer func() { runErl = execRunner }()
+
+	err = startCmd(context.Background(), []string{dir}, &bytes.Buffer{})
+	if err == nil {
+		t.Fatal("want error for traversal app name in wm.json, got nil")
+	}
+	if !strings.Contains(err.Error(), "invalid app name") {
+		t.Fatalf("err = %q, want substring 'invalid app name'", err.Error())
+	}
+	if called {
+		t.Fatal("erl must not be invoked when the manifest app name fails validation")
+	}
+	if _, statErr := os.Stat(filepath.Join(os.TempDir(), "pwn.vmargs")); statErr == nil {
+		t.Fatal("cookie run-file must not be written outside the state dir")
+	}
+}
+
+// TestStartRejectsTraversalVsn mirrors TestStartRejectsTraversalAppName for
+// the Vsn field, which is spliced into relDir (and from there into boot,
+// sysConfig, relVmArgs) before the fix.
+func TestStartRejectsTraversalVsn(t *testing.T) {
+	dir := t.TempDir()
+	relDir := filepath.Join(dir, "releases", "0.2.5")
+	os.MkdirAll(relDir, 0o755)
+	man := release.Manifest{App: "echo", Vsn: "../../../../tmp/pwn", Node: "echo@127.0.0.1"}
+	data, err := man.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.WriteFile(filepath.Join(dir, "wm.json"), data, 0o644)
+
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+
+	called := false
+	runErl = func(_ context.Context, _, name string, a ...string) error {
+		called = true
+		return nil
+	}
+	defer func() { runErl = execRunner }()
+
+	err = startCmd(context.Background(), []string{dir}, &bytes.Buffer{})
+	if err == nil {
+		t.Fatal("want error for traversal vsn in wm.json, got nil")
+	}
+	if !strings.Contains(err.Error(), "invalid vsn") {
+		t.Fatalf("err = %q, want substring 'invalid vsn'", err.Error())
+	}
+	if called {
+		t.Fatal("erl must not be invoked when the manifest vsn fails validation")
 	}
 }
 
