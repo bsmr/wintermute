@@ -4,17 +4,22 @@ Snapshot for resuming work in a fresh session. Updated 2026-07-12.
 
 ## Where things stand
 
-**0.2.6 self-contained OTP target system is COMPLETE on `development-0.2.6-work`,
-pending merge.** It is the seventh step of the 0.2.x line (single-node →
-distributed → gen_server → application → persistent node → full OTP release →
-**self-contained target system**), and the second with no transpiler change —
-pure CLI/release tooling. The 7-task build was TDD'd: Tasks 1–5 subagent-driven
-(fresh implementer + two-stage review per task), Tasks 6–7 (real-OTP integration +
-gate) done inline.
+**0.2.6 self-contained OTP target system is RELEASED: squash-merged to `main`
+= `308cb51`, tagged `v0.2.6`, pushed to ALL THREE remotes (`origin`, `upstream`,
+`github`); `production-0.2.6` created.** It is the seventh step of the 0.2.x line
+(single-node → distributed → gen_server → application → persistent node → full OTP
+release → **self-contained target system**), and the second with no transpiler
+change — pure CLI/release tooling. The 7-task build was TDD'd: Tasks 1–5
+subagent-driven (fresh implementer + two-stage review per task), Tasks 6–7
+(real-OTP integration + gate) done inline. Two review gates fired three real fixes
+this cycle: the final whole-branch review (opus) caught a tar-bomb (artifact now
+unpacks into a single `<app>-<vsn>/` dir); the Copilot gate caught a shell-injection
+via `--vsn` into the generated launchers and a swallowed `TarGz` close error — all
+folded in with regression tests (see below).
 
-**0.2.5 full OTP release is released on `main` = `538bae0`, tagged `v0.2.5`,**
-pushed to ALL THREE remotes (`origin`, `upstream`, `github`). **0.2.0–0.2.4** are
-all on `main` and all remotes; **0.1.0** shipped (`production-0.1.0`, tag `v0.1.0`).
+**With 0.2.6 the 0.2.x deployment line is feature-complete for the echo subset.**
+0.2.5 (`v0.2.5`, `538bae0`), 0.2.0–0.2.4, and 0.1.0 (`production-0.1.0`, `v0.1.0`)
+are all released on `main` and all remotes.
 
 The completed 0.2.x line is promoted to **0.3.0** after a further review + fix
 session (see the `release-versioning-model` memory).
@@ -116,17 +121,13 @@ go test -tags integration ./internal/pkg/cli/        # 0.2.5 e2e + rung VII self
 ./bin/wm release <sources>... --out DIR --self-contained   # -> DIR/<app>-<vsn>.tar.gz
 ```
 
-## Next step: merge 0.2.6, then 0.3.0 promotion (or 0.2.7)
+## Next step: pick the next milestone (0.2.6 is shipped)
 
-**Merge (per the git workflow):** `development-0.2.6-work` → squash-merge into
-`development-0.2.6-main` (`git merge --squash` + `git commit -s`) → regular merge
-into `main` → create `production-0.2.6`. **Before the github-bound push run the
-Copilot review gate** on the staged squash diff (per `CLAUDE.md`); push order is
-**origin → upstream → github** (see the `release-push-order` memory), tagged `v0.2.6`.
-
+0.2.6 is merged, tagged `v0.2.6`, and on all three remotes — nothing pending.
 The staged deployment plan (agreed during the 0.2.3 brainstorm) is now fully
 delivered: B (persistent node, 0.2.4), C (full OTP release, 0.2.5), and the ERTS-
-bundling follow-up (self-contained target system, 0.2.6). Candidates for next:
+bundling follow-up (self-contained target system, 0.2.6). Candidates for next
+(no decision made yet — start with `superpowers:brainstorming` once chosen):
 
 - **0.3.0 promotion** of the whole 0.2.x line (the line is feature-complete for the
   echo subset — single-node → distributed → gen_server → application → persistent
