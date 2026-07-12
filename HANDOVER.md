@@ -4,77 +4,73 @@ Snapshot for resuming work in a fresh session. Updated 2026-07-12.
 
 ## Where things stand
 
-**0.3.0 — the promotion of the feature-complete 0.2.x line — is RELEASED:
-squash-merged to `main` = `54d6855`, tagged `v0.3.0`, pushed to ALL THREE remotes
-(`origin`, `upstream`, `github`); `production-0.3.0` created (origin only —
-upstream/github carry no `production-*`).** Per the `release-versioning-model`,
-`X.(Y+1).0` is a **review + fix** consolidation, not a feature release: 0.3.0
-adds NO new capability, no transpiler change, no `pkg/otp` change. It closes the
-0.2.x line (single-node → distributed → gen_server → application → persistent
-node → release → self-contained target system → native interop).
+**0.3.1 — the value model, first step of the 0.3.x transpiler-language line — is
+RELEASED:** squash-merged to `main` = `a6d1575` ("feat: Wintermute 0.3.1 — value
+model"), tagged `v0.3.1`, pushed to ALL THREE remotes (`origin`, `upstream`,
+`github`); `production-0.3.1` created (origin only). The **GitHub release is
+live and marked Latest**: <https://github.com/bsmr/wintermute/releases/tag/v0.3.1>.
+`VERSION` is `0.3.1`.
 
-The 5-task build was subagent-driven (fresh implementer + two-stage review per
-task). The final whole-branch review (opus) returned "ready to merge"; the
-Copilot gate on the release diff found **no exploitable defects**.
+Per the `release-versioning-model`, 0.3.1 is a **feature step** (`X.Y.z`): it
+adds real transpiler capability, unlike the 0.3.0 review-and-fix promotion.
 
-**Post-release (current `main` HEAD = `53dae45`):** the GitHub **Releases page is
-now populated** — all 7 tags (`v0.1.0`, `v0.2.3`–`v0.3.0`) were backfilled as
-GitHub releases with notes from each version's `feat:` commit (`v0.3.0` =
-Latest). The **README** was expanded (release badge, a roadmap/release-history
-table, a "what Wintermute transpiles today" coverage summary, current-release
-status). A new **project-workflow rule** is documented in `CLAUDE.md`: on every
-github push, also publish a GitHub release from the tag (`gh release create …`),
-not just a bare tag — so this runs as part of the finishing flow from 0.3.1 on.
-The README + workflow doc commit (`53dae45`) is on all three remotes.
+### 0.3.1 delivered (transpiler value model — NO control flow yet)
 
-### 0.3.0 delivered (all hardening / cleanup)
+The transpiler (`internal/pkg/transpile/transpile.go`, a go/ast pattern-matcher)
+went from a flat "comma-sequence of expression statements" body to one that binds
+names and yields a value:
 
-- **Control-node cookie off argv (the core fix):** the short-lived control nodes
-  for `wm stop`/`status`/`call`/`attach` now load the RCE-grade Erlang
-  distribution cookie from a `0o600` `erl -args_file` (new `cookieArgsFile` in
-  `internal/pkg/cli/node.go`) instead of `-setcookie` on argv (previously visible
-  via `/proc`/`ps` for the sub-second lifetime). This closes the last
-  cookie-on-argv residual from 0.2.5. Each command `defer`s the temp-file cleanup
-  on every path.
-- **DRY + validation:** a shared `controlTarget` preamble (`cli.go`) replaces the
-  duplicated `resolveApp → parseVersionFlag → readState → NewLayout` in
-  `stop`/`status`/`attach`, and folds in `erlang.ValidateVersion` (previously
-  unenforced for `stop`/`status`/`call`/`attach`; `call` gets it inline).
-- **security-review sweep** (opus, whole 0.2.x surface — **no Critical/Important
-  found**; four Minor hardenings folded by user decision):
-  - `validVsn` rejects `..`.
-  - `Untar` (`internal/pkg/release/archive.go`) rejects absolute/traversing
-    symlink targets and surfaces the `os.Symlink` error (was `_ =`).
-  - the generated `bin/stop` (`StopScript`) halts non-zero on `{badrpc, _}`
-    (unreachable node) instead of always exiting 0.
-  - `validAppName` (`node.go`) rejects shell/Erlang-dangerous characters
-    (`" ' \` $ ; ( ) { } [ ] < > |`, whitespace) — still accepts dotted versions
-    (`0.3.0`) and lowercase app/module names (it is overloaded to validate both
-    `m.App`/app names AND `m.Vsn`).
-- **Test hygiene:** the integration tests no longer leak detached `beam.smp`
-  nodes. `bin/stop`'s exit status cannot be trusted for cleanup (async
-  `init:stop/0` + a stale baked-in rpc target once the test rewrites `vm.args`),
-  so `t.Cleanup` now SIGKILL-sweeps any node rooted at the test's unique temp dir
-  (`pkill -9 -f <unpack>`). Plus a `strings.CutSuffix` nit in `resolveApp`.
+- **Function parameters:** `func Add(X, Y int) int` → `add(X, Y) ->`. Parameter
+  names must be uppercase-leading (Erlang variables); lowercase and **unnamed**
+  params are rejected, never auto-capitalized. Exported functions export with the
+  correct arity `f/N` (was hardcoded `f/0`).
+- **Trailing `return`:** `return expr` as the last statement emits `expr` as the
+  function value. Early/multi-value return rejected → 0.3.2. A return before a
+  receive is correctly rejected as a non-tail early return (`isTail` threading
+  through `emitStmts`).
+- **Local bindings:** `Z := expr` → Erlang match `Z = expr`. Re-assignment (`=`)
+  and rebinding an already-bound name are rejected (immutability).
+- **Calls with arguments:** `f(A, B)` → `f(A, B)`; enables self-recursion
+  emission (Erlang LCO is free). Non-trivial recursion still needs a base-case
+  branch (`case`/`if`, 0.3.2).
+- **Real-toolchain rung:** `testdata/valuemodel/math.go` transpiles AND compiles
+  with `erlc` to a `.beam` (`TestRung_ValueModel`, `-tags integration`).
 
-### Verification gate (all green) — 0.3.0, run 2026-07-12 on final `main` (54d6855)
+### How it was built (subagent-driven, TDD) and what the gate caught
+
+5 subagent-driven tasks (fresh implementer + two-stage review each). One
+**Critical caught mid-branch** by review (return-before-receive silently
+accepted → `isTail` fix). Whole-branch opus review returned "ready to merge".
+
+**The Copilot gate then earned its keep:** on the release diff it found **2
+Critical + 1 Minor silent-mis-transpile bugs the task and final reviews all
+missed** — the value-model names were never integrated with the receive-pattern
+binding:
+
+- **param name == receive struct-field name** → Erlang treated the pattern
+  variable as an *equality match*, not a fresh bind (silent semantic change).
+- **`:=` name == receive field name** → runtime `badmatch` (`receiveHead` never
+  registered field names into the emitter's `bound` set).
+- unnamed param `func F(int, string)` → silent `f/0` arity drop.
+
+Fixed (folded into the squash via re-squash before the github push): `receiveHead`
+now registers each field name into `bound` and rejects a collision with any
+already-bound name (param / prior `:=` / prior receive field); `paramNames`
+rejects unnamed params; a shared `emitArgs` helper dedups the arg-emission loops.
+The fix also closed a latent bug (`otp.Receive().([]int)` no longer emits a broken
+empty pattern). opus review of the fix: approved, no issues. **Copilot gate #2 on
+the corrected diff: clean — no remaining silent-codegen bugs.**
+
+### Verification gate (all green) — 0.3.1, run 2026-07-12 on `a6d1575`
 
 - `go build -o bin/wm ./cmd/wm` clean; `go test ./...` all 5 packages green.
-- `go test -tags integration ./internal/pkg/ladder/` — 24 rungs (forced re-run,
-  31.9s; `release.go` changed so the cache was invalidated).
-- `go test -tags integration ./internal/pkg/cli/` — 0.2.5 e2e + rung VII + native
-  e2e, 23.9s; **`pgrep -xc beam.smp` = 0 after** (the leak fix works).
-- `govulncheck` clean; `gitleaks` clean.
-- `gosec ./...` — **53 findings** (was 52 in 0.2.7; +1 Medium/Low from the new
-  `Untar` symlink error path). **5 HIGH, all `G703`** (path-traversal-via-taint on
-  wm's own artifacts) — the same accepted dual-use class as 0.2.4–0.2.7. No new
-  unaccepted HIGH/CRITICAL category.
-
-### Copilot review gate (pre-github) — clean
-
-No exploitable defects. Two informational notes (no security impact, backlog
-only): `cookieArgsFile` uses shared `/tmp` (but `0o600` protects); a SIGKILL
-orphans a `0o600` cookie file in `/tmp` (owner-only, no leak).
+- `go test -tags integration ./internal/pkg/ladder/` green (31.7s, includes the
+  new value-model erlc rung); `go test -tags integration ./internal/pkg/cli/`
+  green (20s); `pgrep -xc beam.smp` = 0 after (no leaked nodes).
+- `govulncheck` clean; `gitleaks` clean; `gosec ./...` = **53 issues / 5 HIGH,
+  identical to the 0.3.0 baseline**, all 5 HIGH the accepted G703 class in
+  cli/release, **ZERO findings in the transpile package** (0.3.1 is pure string
+  emission, no I/O/exec — no new security surface).
 
 ## Build & test
 
@@ -82,92 +78,85 @@ orphans a `0o600` cookie file in `/tmp` (owner-only, no leak).
 go build -o bin/wm ./cmd/wm
 go test ./...
 ./bin/wm erlang install                              # OTP 29.0.3 -> ~/.local/erlang/29.0.3
-go test -tags integration ./internal/pkg/ladder/     # 24 rungs
-go test -tags integration ./internal/pkg/cli/        # 0.2.5 e2e + rung VII + native e2e
+go test -tags integration ./internal/pkg/ladder/     # includes TestRung_ValueModel (erlc)
+go test -tags integration ./internal/pkg/cli/
 ```
 
-**Integration-test gotcha (now mitigated):** the CLI/ladder integration tests
-boot detached BEAM nodes; 0.3.0 added a SIGKILL sweep so a failed `bin/stop` no
-longer leaks a node. If a suite still fails oddly (e.g. after a hard interrupt),
-clear the env first: `pkill -9 -x beam.smp; pkill -9 -x epmd`, then re-run. See
-the `integration-test-leftover-nodes` memory.
+**Integration-test gotcha (mitigated since 0.3.0):** the CLI/ladder integration
+tests boot detached BEAM nodes; a SIGKILL sweep stops a failed `bin/stop` from
+leaking one. If a suite still fails oddly after a hard interrupt, clear first:
+`pkill -9 -x beam.smp; pkill -9 -x epmd`, then re-run. See the
+`integration-test-leftover-nodes` memory.
 
-## Next step: 0.3.x transpiler-language work (the new line)
+## Next step: 0.3.2 — operators + `if`/`case`/`switch`
 
-0.3.0 is merged, tagged, and on all remotes — nothing pending. The 0.3.x line is
-the **transpiler-language / OTP-behaviour completion** (agreed during the coverage
-discussion). Suggested cut (start each with `superpowers:brainstorming`):
+0.3.1 is merged, tagged, and on all remotes — nothing pending. The 0.3.x line
+continues (each step starts with `superpowers:brainstorming`):
 
-- **0.3.1 — the language core:** function parameters (drop the "only nullary"
-  restriction), `case`/`switch` → Erlang `case`, comparison/boolean operators,
-  guards, and tail-recursion (falls out of parameters + recursion; Erlang's LCO is
-  free). This is the load-bearing step; the behaviour/callback work below is then
-  mostly marker recognition.
-- **0.3.2 — full gen_server callbacks:** `handle_cast`/`handle_info`/`terminate`/
-  `code_change` (marker recognition, little new language surface).
-- **0.3.3 — `gen_statem` / `gen_event`:** new behaviour detection + callback sets.
+- **0.3.2 — control flow + operators:** comparison (`==` `!=` `<` `>` `<=` `>=`)
+  and boolean (`&&` `||` `!`) operators, and `if`/`case`/`switch` → Erlang `case`.
+  This is where the flat "comma-sequence" body finally becomes a value-yielding
+  tree (0.3.1's Approach A deliberately deferred that abstraction). It also makes
+  0.3.1's recursion *useful* (a base-case branch becomes expressible).
+- **0.3.3 — full gen_server callbacks** (`handle_cast`/`handle_info`/`terminate`/
+  `code_change`) and/or **`gen_statem` / `gen_event`**: mostly marker recognition
+  once the language core is in.
 
-Key framing (from the coverage analysis): the transpiler should cover only what
-maps cleanly to Erlang; loops, list comprehensions, and mutable state stay in the
-native-`.erl` escape hatch (0.2.7), NOT the transpiler.
+Framing (unchanged): the transpiler covers only what maps cleanly to Erlang;
+loops, list comprehensions, mutable state stay in the native-`.erl` escape hatch
+(0.2.7), NOT the transpiler.
 
 ## Backlog (deferred)
 
-- **0.3.0 informational nits (no security impact):** `cookieArgsFile` could use a
-  `0o700` state-dir instead of shared `/tmp`; a SIGKILL orphans the `0o600` cookie
-  temp file.
-- **`bin/stop` async-stop residual:** Fix 3 makes it `halt(1)` on an unreachable
-  node, but on the success path `init:stop/0` is async, so exit 0 does not prove
-  the node is dead the instant `bin/stop` returns. Inherent to `init:stop/0`;
-  operational, not security.
-- **Integration-test cleanup block** is duplicated verbatim across
-  `native_`/`selfcontained_integration_test.go` (each `unpack` is its own
-  `t.TempDir()`); a shared helper would be marginal.
+- **0.3.1 non-blocking nits (from the Copilot gate + reviews, no mis-transpile):**
+  - uppercase-parameter check is duplicated: generic in `paramNames`, and inline
+    for `HandleCall`'s single parameter — unify behind `paramNames`/a helper.
+  - imprecise error wording: compound-assign (`+=`) hits the generic "single-name
+    `:=`" message; `_ :=` hits the "uppercase" message. Both correctly rejected.
+  - `func F(X, X int)` (duplicate param name — invalid Go, but the transpiler
+    doesn't type-check) would emit `f(X, X)`; harden when 0.3.2 touches params.
+  - naked `return` (no value) in a typed function is rejected, not emitted as `ok`
+    — deliberate per spec ("return must yield exactly one value").
 - **relup/appup hot upgrades** — groundwork present (`RELEASES`/`start_erl.data`);
   no `release_handler` upgrade flow, no appup generation.
 - **`bin/attach`** for the target system — erts ships `to_erl`/`run_erl`;
   `bin/start` boots via `erl -detached`, so `to_erl` cannot attach.
-- **Native-interop follow-ups (from 0.2.7):** native application module
-  (`-behaviour(application)` scan), an `otp.Apply(module, func, args...)` marker
-  for direct Go→pure-native-function calls, and the inline escape hatch (option B).
+- **Native-interop follow-ups (from 0.2.7):** native application module scan,
+  an `otp.Apply(module, func, args...)` marker, the inline escape hatch (option B).
 - **shared command-preamble DRY:** `controlTarget` covers the control-node
   commands; `start`/`release` still have their own preambles.
-- **`absEbin` unescaped** in the `make_script`/`make_tar` `-eval` (self-inflicted
-  via `--out`, no trust boundary; deliberately not fixed in 0.3.0).
-- **transpiler subset (deferred, now the 0.3.x line):** function parameters,
-  `case`/guards/operators, `handle_cast`/`handle_info`/`terminate`/`code_change`,
-  multiple state fields, `Init` args, multiple gen_servers per module, supervisor
-  strategy/child-spec selection, `gen_statem`/`gen_event`, richer `.app`.
+- **`bin/stop` async-stop residual** and **`absEbin` unescaped** in the release
+  `-eval` (self-inflicted, no trust boundary) — see git history for detail.
 
 ## Gotchas
 
 - **Module path is `go.muehmer.eu/wintermute`**, not the GitHub repo path.
-- **Transpiler is go/ast-only for the echo subset** — errors on anything outside
-  it, by design. **0.3.0 does not touch the transpiler.**
-- **The control-node cookie is loaded via `-args_file`, never on argv** (0.3.0);
-  `validAppName` is overloaded to validate app names AND `m.Vsn` — do NOT tighten
-  it to an atom-only charset (that breaks dotted versions).
-- **Integration tests SIGKILL-sweep leftover nodes** (0.3.0); a clean `bin/stop`
-  exit does not prove the target node died (async `init:stop/0`).
+- **Transpiler subset only** — errors on anything outside it, by design. 0.3.1
+  added parameters/`return`/`:=`/calls-with-args; operators beyond `+`,
+  `if`/`case`/`switch`, guards, multi-value return, cross-module plain calls all
+  still error (0.3.2+).
+- **Receive-field names are Erlang variables** and are now registered in the
+  emitter's `bound` set; a param or `:=` colliding with a field is REJECTED (do
+  not "fix" this by auto-renaming — the rejection is the correct no-automatism
+  behavior).
 - **Gated remotes** (`upstream`, `github`) receive only tagged releases from
-  `main`, in order origin→upstream→github. Copilot review gate runs before
-  github-bound commits; findings are folded via re-squash before the push.
-  Handover/doc-only commits go to origin and reach the gated remotes with the
-  next release. **On every github push, also publish a GitHub release from the
-  tag** (`gh release create vX.Y.Z --repo bsmr/wintermute --verify-tag --title
-  "Wintermute X.Y.Z — <subtitle>" --notes-file <notes> --latest`; notes = the
-  `feat:` commit body minus the `Co-Authored-By` trailer) — see `CLAUDE.md`.
+  `main`, in order origin→upstream→github. **The Copilot review gate runs on the
+  release diff before the github push and can find real bugs the internal reviews
+  miss — fold its findings via re-squash before pushing.** Handover/doc-only
+  commits go to origin and reach the gated remotes with the next release. **On
+  every github push, also publish a GitHub release from the tag** (`gh release
+  create vX.Y.Z --repo bsmr/wintermute --verify-tag --title "Wintermute X.Y.Z —
+  <subtitle>" --notes-file <notes> --latest`; notes = the `feat:` commit body
+  minus the `Co-Authored-By` trailer) — see `CLAUDE.md`.
 - `.superpowers/` (SDD ledger, task briefs/reports) and `bin/` are gitignored
-  scratch. **Always regenerate `task-N-brief` fresh** (`scripts/task-brief`) — the
-  fixed path leaks stale content between versions.
+  scratch. **Always regenerate `task-N-brief` fresh** (`scripts/task-brief`).
 - `testdata/` Go fixtures are not built by `go test ./...`; they are only read as
   source by the transpiler / integration tests.
 
 ## Key artifacts
 
-- 0.3.0 spec: `docs/superpowers/specs/2026-07-12-wintermute-0.3.0-promotion-design.md`
-- 0.3.0 plan: `docs/superpowers/plans/2026-07-12-wintermute-0.3.0-promotion.md`
-- earlier specs/plans: `docs/superpowers/{specs,plans}/2026-07-1{0,1,2}-wintermute-0.2.*`
-- SDK index: `docs/SDK-INDEX.md` (unchanged in 0.3.0 — no `pkg/` change)
-- Verified sources + local build record: `docs/verified-sources.md`
+- 0.3.1 spec: `docs/superpowers/specs/2026-07-12-wintermute-0.3.1-value-model-design.md`
+- 0.3.1 plan: `docs/superpowers/plans/2026-07-12-wintermute-0.3.1-value-model.md`
+- earlier specs/plans: `docs/superpowers/{specs,plans}/2026-07-1{0,1,2}-wintermute-0.*`
+- SDK index: `docs/SDK-INDEX.md` (unchanged in 0.3.1 — no `pkg/` change)
 - Project rules: `CLAUDE.md`
