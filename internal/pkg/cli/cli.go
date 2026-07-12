@@ -114,7 +114,7 @@ func buildCmd(args []string, stdout io.Writer) error {
 		return err
 	}
 	if len(rest) == 0 {
-		return fmt.Errorf("usage: wm build <path>... [--out DIR] [--vsn X]")
+		return fmt.Errorf("usage: wm build <path>... [--out DIR] [--vsn X]" + nativeErlUsageHint)
 	}
 	if err := os.MkdirAll(out, 0o755); err != nil {
 		return err
@@ -147,9 +147,37 @@ func buildCmd(args []string, stdout io.Writer) error {
 
 // buildApp transpiles each Go path to <out>/<module>.erl (refusing to
 // overwrite) and reports the application module (empty if none), all module
-// names, and all registered names. Shared by `wm build` and `wm start`.
+// names, and all registered names. A hand-written .erl path bypasses the
+// transpiler and is copied through unchanged. Shared by `wm build` and
+// `wm release`.
 func buildApp(paths []string, out string) (appMod string, modules, registered []string, err error) {
 	for _, path := range paths {
+		if strings.HasSuffix(path, ".erl") {
+			// Native escape hatch: a hand-written Erlang module. erlc requires
+			// -module(x) to match x.erl, so the basename is the module name.
+			// Validate it (the only injection surface — it is spliced into the
+			// output path and the .app {modules,...} list) and copy the source
+			// through unchanged; wm release erlc's it like any transpiled module.
+			mod := strings.TrimSuffix(filepath.Base(path), ".erl")
+			if !validAppName(mod) {
+				return appMod, modules, registered, fmt.Errorf("invalid native module name %q (from %s)", mod, path)
+			}
+			data, err := os.ReadFile(path)
+			if err != nil {
+				return appMod, modules, registered, err
+			}
+			// Fail fast on a -module/filename mismatch with a clear message rather
+			// than deferring to erlc's downstream error — and wm build never erlc's,
+			// so it would otherwise emit an .app inconsistent with the source.
+			if name, ok := erlModuleName(data); ok && name != mod {
+				return appMod, modules, registered, fmt.Errorf("native module name mismatch: %s declares -module(%s) but the file basename is %q", path, name, mod)
+			}
+			if err := writeModule(outPath(out, mod), data); err != nil {
+				return appMod, modules, registered, err
+			}
+			modules = append(modules, mod)
+			continue
+		}
 		src, err := os.ReadFile(path)
 		if err != nil {
 			return appMod, modules, registered, err
@@ -158,11 +186,7 @@ func buildApp(paths []string, out string) (appMod string, modules, registered []
 		if err != nil {
 			return appMod, modules, registered, err
 		}
-		dst := outPath(out, r.Module)
-		if _, err := os.Stat(dst); err == nil {
-			return appMod, modules, registered, fmt.Errorf("%s already exists (refusing to overwrite; use --out or remove it)", dst)
-		}
-		if err := os.WriteFile(dst, []byte(r.Erl), 0o644); err != nil {
+		if err := writeModule(outPath(out, r.Module), []byte(r.Erl)); err != nil {
 			return appMod, modules, registered, err
 		}
 		modules = append(modules, r.Module)
@@ -175,6 +199,40 @@ func buildApp(paths []string, out string) (appMod string, modules, registered []
 		}
 	}
 	return appMod, modules, registered, nil
+}
+
+// nativeErlUsageHint documents, in the build/release usage strings, that inputs
+// may be hand-written .erl modules alongside Go sources.
+const nativeErlUsageHint = "\n  <path> may be a .go source or a hand-written .erl module"
+
+// writeModule writes a module's Erlang source to dst, refusing to overwrite an
+// existing file (a name collision between two inputs). Shared by the transpiled
+// and native branches of buildApp.
+func writeModule(dst string, data []byte) error {
+	if _, err := os.Stat(dst); err == nil {
+		return fmt.Errorf("%s already exists (refusing to overwrite; use --out or remove it)", dst)
+	}
+	return os.WriteFile(dst, data, 0o644)
+}
+
+// erlModuleRe matches an Erlang -module(Name) attribute at the start of a
+// whitespace-trimmed line; Name is the atom text (quoted atoms accepted).
+var erlModuleRe = regexp.MustCompile(`^-\s*module\(\s*'?([a-zA-Z0-9_@]+)'?\s*\)`)
+
+// erlModuleName returns the module name declared by a hand-written .erl source,
+// skipping comment (%) and blank lines. ok is false when no -module attribute is
+// found — buildApp does not second-guess such a file; erlc rejects it downstream.
+func erlModuleName(src []byte) (name string, ok bool) {
+	for _, line := range strings.Split(string(src), "\n") {
+		t := strings.TrimSpace(line)
+		if t == "" || strings.HasPrefix(t, "%") {
+			continue
+		}
+		if m := erlModuleRe.FindStringSubmatch(t); m != nil {
+			return m[1], true
+		}
+	}
+	return "", false
 }
 
 // parseVsnFlag pulls an optional --vsn X (or --vsn=X); empty if absent.

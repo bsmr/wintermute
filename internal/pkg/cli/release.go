@@ -54,7 +54,7 @@ func releaseCmd(ctx context.Context, args []string, stdout io.Writer) error {
 		return err
 	}
 	if len(rest) == 0 {
-		return fmt.Errorf("usage: wm release <path>... [--name N] [--out DIR] [--version X] [--vsn V] [--tar] [--self-contained]")
+		return fmt.Errorf("usage: wm release <path>... [--name N] [--out DIR] [--version X] [--vsn V] [--tar] [--self-contained]" + nativeErlUsageHint)
 	}
 	if vsn == "" {
 		if v, verr := readVersion(); verr == nil {

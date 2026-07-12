@@ -66,6 +66,21 @@ wm release echo_app.go echo_sup.go echo_server.go --out build/echo --self-contai
 tar xzf echo-<vsn>.tar.gz && ./echo-<vsn>/bin/start   # ./echo-<vsn>/bin/stop to shut down
 ```
 
+### Native Erlang modules (escape hatch)
+
+Wintermute is Go-first but Erlang-capable. When the Go subset cannot express
+what OTP needs (records, macros, complex guards, binary pattern matching, list
+comprehensions), hand-write a `.erl` module and pass it to `wm build`/`wm release`
+alongside your `.go` sources:
+
+    wm release app.go sup.go server.erl --out dist
+
+The `.erl` file bypasses the transpiler, is compiled natively with `erlc`, and is
+packaged into the release. Transpiled Go and native modules interoperate through
+the normal OTP mechanisms — a native `gen_server` registered as `{global, Name}`
+is reachable from Go via `otp.CallGlobal("Name", ...)`. Native modules are
+libraries/servers; the application and supervisor modules stay Go.
+
 ---
 
 ## Prerequisites

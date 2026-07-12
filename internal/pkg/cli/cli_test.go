@@ -849,3 +849,87 @@ func TestAttachAssemblesRemsh(t *testing.T) {
 		}
 	}
 }
+
+func TestBuildAppAcceptsNativeErl(t *testing.T) {
+	src := t.TempDir()
+	erl := filepath.Join(src, "greeting.erl")
+	os.WriteFile(erl, []byte("-module(greeting).\n-export([hi/0]).\nhi() -> ok.\n"), 0o644)
+	out := t.TempDir()
+
+	appMod, modules, registered, err := buildApp([]string{erl}, out)
+	if err != nil {
+		t.Fatalf("buildApp: %v", err)
+	}
+	if appMod != "" {
+		t.Errorf("appMod = %q, want empty (native modules are non-application)", appMod)
+	}
+	if len(registered) != 0 {
+		t.Errorf("registered = %v, want none", registered)
+	}
+	if len(modules) != 1 || modules[0] != "greeting" {
+		t.Fatalf("modules = %v, want [greeting]", modules)
+	}
+	if b, err := os.ReadFile(filepath.Join(out, "greeting.erl")); err != nil || !strings.Contains(string(b), "-module(greeting)") {
+		t.Fatalf("native .erl not copied through: %v", err)
+	}
+}
+
+func TestBuildAppNativeErlCollision(t *testing.T) {
+	src := t.TempDir()
+	// A Go module named "m" and a native m.erl collide on outPath(out, "m").
+	goSrc := filepath.Join(src, "main.go")
+	os.WriteFile(goSrc, []byte("package m\nfunc Serve() {}\n"), 0o644)
+	erl := filepath.Join(src, "m.erl")
+	os.WriteFile(erl, []byte("-module(m).\n"), 0o644)
+	out := t.TempDir()
+
+	_, _, _, err := buildApp([]string{goSrc, erl}, out)
+	if err == nil || !strings.Contains(err.Error(), "already exists") {
+		t.Fatalf("expected overwrite-refusal on collision, got %v", err)
+	}
+}
+
+func TestBuildAppNativeErlInvalidName(t *testing.T) {
+	src := t.TempDir()
+	erl := filepath.Join(src, "bad..name.erl") // basename contains ".."
+	os.WriteFile(erl, []byte("-module(x).\n"), 0o644)
+	_, _, _, err := buildApp([]string{erl}, t.TempDir())
+	if err == nil || !strings.Contains(err.Error(), "invalid native module") {
+		t.Fatalf("expected invalid-name rejection, got %v", err)
+	}
+}
+
+func TestUsageMentionsErlInputs(t *testing.T) {
+	var buf bytes.Buffer
+	// release with no source paths prints its usage to the error.
+	err := Run(context.Background(), []string{"release"}, strings.NewReader(""), &buf, &buf)
+	if err == nil || !strings.Contains(err.Error(), ".erl") {
+		t.Fatalf("release usage should mention .erl inputs, got err=%v", err)
+	}
+}
+
+func TestBuildAppNativeErlModuleMismatch(t *testing.T) {
+	src := t.TempDir()
+	// File is bar.erl but declares -module(foo) — erlc would reject this later;
+	// buildApp fails fast with a clear message naming both.
+	erl := filepath.Join(src, "bar.erl")
+	os.WriteFile(erl, []byte("-module(foo).\n-export([hi/0]).\nhi() -> ok.\n"), 0o644)
+	_, _, _, err := buildApp([]string{erl}, t.TempDir())
+	if err == nil || !strings.Contains(err.Error(), "module name") {
+		t.Fatalf("expected -module/filename mismatch rejection, got %v", err)
+	}
+}
+
+func TestBuildAppNativeErlModuleCommentIgnored(t *testing.T) {
+	src := t.TempDir()
+	// A commented-out -module must not fool the scan; the real declaration matches.
+	erl := filepath.Join(src, "greeting.erl")
+	os.WriteFile(erl, []byte("% -module(wrong).\n-module(greeting).\nhi() -> ok.\n"), 0o644)
+	_, modules, _, err := buildApp([]string{erl}, t.TempDir())
+	if err != nil {
+		t.Fatalf("commented -module should be ignored, got %v", err)
+	}
+	if len(modules) != 1 || modules[0] != "greeting" {
+		t.Fatalf("modules = %v, want [greeting]", modules)
+	}
+}
