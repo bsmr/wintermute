@@ -101,3 +101,13 @@ remote. Three remotes, only `origin` is developed on:
   Only fast-forward, squashed merges land on `main` first, then `main` is pushed
   to `upstream`/`github` as **tagged** releases. Milestones may get their own
   named branches.
+- **GitHub release on every github push**: after pushing a tag to `github`, also
+  publish a GitHub release from it so the change is visible on the Releases page
+  (not just a bare tag). Use the version's `feat:` commit body as the notes
+  (strip the `Co-Authored-By` trailer), title `Wintermute X.Y.Z — <subtitle>`,
+  and mark the newest `--latest`:
+
+  ```bash
+  gh release create vX.Y.Z --repo bsmr/wintermute --verify-tag \
+    --title "Wintermute X.Y.Z — <subtitle>" --notes-file <notes> --latest
+  ```
