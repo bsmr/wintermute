@@ -17,6 +17,16 @@ The 5-task build was subagent-driven (fresh implementer + two-stage review per
 task). The final whole-branch review (opus) returned "ready to merge"; the
 Copilot gate on the release diff found **no exploitable defects**.
 
+**Post-release (current `main` HEAD = `53dae45`):** the GitHub **Releases page is
+now populated** — all 7 tags (`v0.1.0`, `v0.2.3`–`v0.3.0`) were backfilled as
+GitHub releases with notes from each version's `feat:` commit (`v0.3.0` =
+Latest). The **README** was expanded (release badge, a roadmap/release-history
+table, a "what Wintermute transpiles today" coverage summary, current-release
+status). A new **project-workflow rule** is documented in `CLAUDE.md`: on every
+github push, also publish a GitHub release from the tag (`gh release create …`),
+not just a bare tag — so this runs as part of the finishing flow from 0.3.1 on.
+The README + workflow doc commit (`53dae45`) is on all three remotes.
+
 ### 0.3.0 delivered (all hardening / cleanup)
 
 - **Control-node cookie off argv (the core fix):** the short-lived control nodes
@@ -143,7 +153,10 @@ native-`.erl` escape hatch (0.2.7), NOT the transpiler.
   `main`, in order origin→upstream→github. Copilot review gate runs before
   github-bound commits; findings are folded via re-squash before the push.
   Handover/doc-only commits go to origin and reach the gated remotes with the
-  next release.
+  next release. **On every github push, also publish a GitHub release from the
+  tag** (`gh release create vX.Y.Z --repo bsmr/wintermute --verify-tag --title
+  "Wintermute X.Y.Z — <subtitle>" --notes-file <notes> --latest`; notes = the
+  `feat:` commit body minus the `Co-Authored-By` trailer) — see `CLAUDE.md`.
 - `.superpowers/` (SDD ledger, task briefs/reports) and `bin/` are gitignored
   scratch. **Always regenerate `task-N-brief` fresh** (`scripts/task-brief`) — the
   fixed path leaks stale content between versions.
