@@ -123,11 +123,21 @@ All errors positioned via `em.errorf`.
 | unmapped binary operator | operator X is unsupported (0.3.3) |
 | unary op other than `!` | unary operator X is unsupported |
 | `if` when `!isTail` | control flow is only supported in tail position |
-| `else if` chain | else-if chains are unsupported (0.3.3); use nested ifs' — rejected |
-| then-block not ending in a value/return | if branch must end in a return |
+| `else if` chain | else-if chains are unsupported (0.3.3); use a nested if — rejected |
+| `if` with an init clause (`if x := …; cond`) | unsupported (0.3.3+) |
+| **bare `if` whose then-branch does not terminate** | then-branch must end in a return; otherwise its fall-through to the continuation cannot be a terminal Erlang case clause |
 | if/else followed by more statements | unreachable statement after a terminating if/else |
-| bare `if` with no continuation | if without else needs a following value (the false branch) |
+| bare `if` with no continuation | a bare if needs a following value (the false branch) |
 | `:=` colliding with an outer bound name inside a branch | (existing) already bound |
+
+A branch's value is its last statement's value (a `return`'s expression, or the
+last expression — consistent with the 0.3.1 body model), so if/else branches are
+**not** required to end in `return`. The termination rule is enforced only for a
+**bare `if`'s then-branch**, because there — and only there — a non-returning
+branch would fall through to the continuation in Go, which a terminal Erlang
+`case` clause cannot express (it would silently yield the branch value instead).
+A `terminates()` helper recognizes a `return` or an if/else whose both branches
+terminate.
 
 ## Testing
 
