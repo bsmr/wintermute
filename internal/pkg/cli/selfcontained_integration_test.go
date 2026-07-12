@@ -77,6 +77,12 @@ func TestSelfContainedTargetSystemEndToEnd(t *testing.T) {
 		stop := exec.Command(filepath.Join(target, "bin", "stop"))
 		stop.Env = scrub
 		_ = stop.Run()
+		// Fallback: SIGKILL any beam still rooted at this test's unique dir. bin/stop
+		// exits 0 even when its rpc:call never reaches the node (init:stop/0 is async,
+		// and this test overwrites vm.args with a fresh node name after the release was
+		// built, so bin/stop's baked-in rpc target is stale) — a clean exit status does
+		// not guarantee the node actually died, so always sweep instead of gating on err.
+		_ = exec.Command("pkill", "-9", "-f", unpack).Run()
 	})
 
 	// 4. Scrubbed control node resolves {global, echo} and calls it.

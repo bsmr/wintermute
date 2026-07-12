@@ -476,7 +476,7 @@ func TestStopAssemblesRpcAndRemovesState(t *testing.T) {
 		t.Fatal(err)
 	}
 	joined := strings.Join(cmds, "\n")
-	for _, want := range []string{"-setcookie c0ffee", "rpc:call('echoapp@127.0.0.1', init, stop, [])"} {
+	for _, want := range []string{"-args_file", "rpc:call('echoapp@127.0.0.1', init, stop, [])"} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("stop cmd missing %q:\n%s", want, joined)
 		}
@@ -561,9 +561,12 @@ func TestCallAppOverrideSelectsNamedNode(t *testing.T) {
 		t.Fatal(err)
 	}
 	joined := strings.Join(gotArgs, " ")
-	// Verify the cookie from echoapp's state was used
-	if !strings.Contains(joined, "-setcookie aaa") {
-		t.Fatalf("call cmd should use echoapp's cookie (-setcookie aaa):\n%s", joined)
+	// Verify the cookie from echoapp's state is used but not leaked on argv
+	if strings.Contains(joined, "-setcookie") || strings.Contains(joined, "aaa") {
+		t.Fatalf("cookie leaked on argv:\n%s", joined)
+	}
+	if !strings.Contains(joined, "-args_file") {
+		t.Fatalf("call should pass -args_file:\n%s", joined)
 	}
 	// Verify the gen_server call is there
 	if !strings.Contains(joined, `gen_server:call({global, echo}, <<"hi">>)`) {
@@ -843,7 +846,7 @@ func TestAttachAssemblesRemsh(t *testing.T) {
 		t.Fatal(err)
 	}
 	joined := strings.Join(gotArgs, " ")
-	for _, want := range []string{"-remsh echoapp@127.0.0.1", "-setcookie c0ffee"} {
+	for _, want := range []string{"-remsh echoapp@127.0.0.1", "-args_file"} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("attach cmd missing %q:\n%s", want, joined)
 		}
@@ -931,5 +934,118 @@ func TestBuildAppNativeErlModuleCommentIgnored(t *testing.T) {
 	}
 	if len(modules) != 1 || modules[0] != "greeting" {
 		t.Fatalf("modules = %v, want [greeting]", modules)
+	}
+}
+
+func TestCookieArgsFileWritesOwnerOnly(t *testing.T) {
+	path, cleanup, err := cookieArgsFile("c0ffee")
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Errorf("mode = %o, want 600", info.Mode().Perm())
+	}
+	body, _ := os.ReadFile(path)
+	if strings.TrimSpace(string(body)) != "-setcookie c0ffee" {
+		t.Errorf("body = %q, want -setcookie c0ffee", body)
+	}
+	cleanup()
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Errorf("cleanup did not remove %s", path)
+	}
+}
+
+func TestStopCookieOffArgv(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	writeState("echoapp", NodeState{Node: "echoapp@127.0.0.1", Cookie: "c0ffee", CodePath: "bin"})
+	var joined string
+	runErl = func(_ context.Context, _, name string, a ...string) error {
+		joined = name + " " + strings.Join(a, " ")
+		return nil
+	}
+	defer func() { runErl = execRunner }()
+	if err := Run(context.Background(), []string{"stop", "echoapp"},
+		strings.NewReader(""), io.Discard, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(joined, "-setcookie") || strings.Contains(joined, "c0ffee") {
+		t.Fatalf("cookie leaked on argv: %s", joined)
+	}
+	if !strings.Contains(joined, "-args_file") {
+		t.Fatalf("stop should pass -args_file: %s", joined)
+	}
+}
+
+func TestStatusCookieOffArgv(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	writeState("echoapp", NodeState{Node: "echoapp@127.0.0.1", Cookie: "c0ffee", CodePath: "bin"})
+	var joined string
+	orig := captureErl
+	captureErl = func(_ context.Context, _, _ string, a ...string) ([]byte, error) {
+		joined = strings.Join(a, " ")
+		return []byte("pong\n"), nil
+	}
+	defer func() { captureErl = orig }()
+	if err := Run(context.Background(), []string{"status", "echoapp"},
+		strings.NewReader(""), io.Discard, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(joined, "-setcookie") || strings.Contains(joined, "c0ffee") {
+		t.Fatalf("cookie leaked on argv: %s", joined)
+	}
+	if !strings.Contains(joined, "-args_file") {
+		t.Fatalf("status should pass -args_file: %s", joined)
+	}
+}
+
+func TestStopRejectsInvalidVersion(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	writeState("echoapp", NodeState{Node: "echoapp@127.0.0.1", Cookie: "c0ffee", CodePath: "bin"})
+	err := Run(context.Background(), []string{"stop", "echoapp", "--version", "1.2"},
+		strings.NewReader(""), io.Discard, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "invalid version") {
+		t.Fatalf("stop should reject bad version, got %v", err)
+	}
+}
+
+func TestStatusRejectsInvalidVersion(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	writeState("echoapp", NodeState{Node: "echoapp@127.0.0.1", Cookie: "c0ffee", CodePath: "bin"})
+	err := Run(context.Background(), []string{"status", "echoapp", "--version", "1.2"},
+		strings.NewReader(""), io.Discard, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "invalid version") {
+		t.Fatalf("status should reject bad version, got %v", err)
+	}
+}
+
+func TestValidVsnRejectsDotDot(t *testing.T) {
+	if validVsn("..") || validVsn("1..2") || validVsn("a..b") {
+		t.Error("validVsn should reject '..'")
+	}
+	if !validVsn("0.3.0") || !validVsn("1.2.3-rc1") {
+		t.Error("validVsn should still accept normal versions")
+	}
+}
+
+func TestValidAppNameRejectsDangerousChars(t *testing.T) {
+	// Still-valid inputs (app/module names and dotted versions).
+	for _, ok := range []string{"echoapp", "echo_server", "0.3.0", "1.2.3-rc1"} {
+		if !validAppName(ok) {
+			t.Errorf("validAppName(%q) should be true", ok)
+		}
+	}
+	// Injection-dangerous inputs.
+	for _, bad := range []string{"a\"b", "a'b", "a`b", "a$b", "a;b", "a b", "a(b)", "a{b}", "a\nb", "../x"} {
+		if validAppName(bad) {
+			t.Errorf("validAppName(%q) should be false", bad)
+		}
 	}
 }

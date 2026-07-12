@@ -3,6 +3,7 @@ package release
 import (
 	"archive/tar"
 	"compress/gzip"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -47,7 +48,15 @@ func Untar(r io.Reader, dst string) error {
 			}
 			f.Close()
 		case tar.TypeSymlink:
-			_ = os.Symlink(hdr.Linkname, target)
+			// Reject an absolute or traversing link target: a symlink whose
+			// target escapes dst is the classic tar symlink-traversal primitive.
+			// Untar's inputs are self-produced today; enforce the assumption here.
+			if filepath.IsAbs(hdr.Linkname) || strings.Contains(hdr.Linkname, "..") {
+				return fmt.Errorf("unsafe symlink target %q in %s", hdr.Linkname, hdr.Name)
+			}
+			if err := os.Symlink(hdr.Linkname, target); err != nil {
+				return err
+			}
 		}
 	}
 }

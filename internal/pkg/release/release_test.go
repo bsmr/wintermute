@@ -81,8 +81,8 @@ func TestStopScript(t *testing.T) {
 	for _, want := range []string{
 		"#!/bin/sh",
 		"releases/0.2.6/start_clean",
-		"'echo@127.0.0.1'",
-		"init, stop",
+		"rpc:call('echo@127.0.0.1', init, stop, [])",
+		"halt(1)",
 	} {
 		if !strings.Contains(s, want) {
 			t.Errorf("StopScript missing %q:\n%s", want, s)

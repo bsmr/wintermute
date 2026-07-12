@@ -83,6 +83,6 @@ HERE=$(cd "$(dirname "$0")/.." && pwd)
 ERTS=$(basename "$HERE"/erts-*)
 exec "$HERE/$ERTS/bin/erl" -boot "$HERE/releases/` + vsn + `/start_clean" \
   -name "wmstop_$$@127.0.0.1" -noshell \
-  -eval "rpc:call('` + node + `', init, stop, []), init:stop()."
+  -eval "case rpc:call('` + node + `', init, stop, []) of {badrpc, R} -> io:format(\"stop failed: ~p~n\", [R]), halt(1); _ -> halt(0) end."
 `
 }

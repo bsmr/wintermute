@@ -15,7 +15,8 @@ import (
 // validAppName rejects empty names and anything that could escape the state
 // directory once joined into statePath (path separators or "..").
 func validAppName(s string) bool {
-	return s != "" && !strings.ContainsAny(s, "/\\") && !strings.Contains(s, "..")
+	return s != "" && !strings.Contains(s, "..") &&
+		!strings.ContainsAny(s, "/\\\"'`$;(){}[]<>| \t\r\n")
 }
 
 // NodeState is the persisted identity of a running wm node, keyed by app name.
@@ -113,6 +114,36 @@ func newCookie() (string, error) {
 		return "", err
 	}
 	return hex.EncodeToString(b), nil
+}
+
+// cookieArgsFile writes cookie to a fresh 0o600 file loadable via `erl
+// -args_file`, so a short-lived control node authenticates WITHOUT exposing the
+// (RCE-grade) cookie on argv (visible via /proc or `ps`). The caller must defer
+// the returned cleanup to remove the file. Mirrors startCmd's long-lived run-file.
+func cookieArgsFile(cookie string) (path string, cleanup func(), err error) {
+	f, err := os.CreateTemp("", "wm-cookie-*.args")
+	if err != nil {
+		return "", func() {}, err
+	}
+	name := f.Name()
+	cleanup = func() { _ = os.Remove(name) }
+	// CreateTemp already makes the file 0o600, but Chmod unconditionally to be
+	// explicit about the owner-only guarantee (mirrors startCmd's run-file).
+	if err := f.Chmod(0o600); err != nil {
+		f.Close()
+		cleanup()
+		return "", func() {}, err
+	}
+	if _, err := f.WriteString("-setcookie " + cookie + "\n"); err != nil {
+		f.Close()
+		cleanup()
+		return "", func() {}, err
+	}
+	if err := f.Close(); err != nil {
+		cleanup()
+		return "", func() {}, err
+	}
+	return name, cleanup, nil
 }
 
 // captureErl runs a command and returns its combined output. Overridable in

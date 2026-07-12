@@ -31,11 +31,12 @@ func validAtom(s string) bool { return atomRE.MatchString(s) }
 // safe to splice unquoted (inside single quotes) into an `erl -eval` string.
 func validNodeName(s string) bool { return nodeRE.MatchString(s) }
 
-// validVsn reports whether s is a safe version string. It is stricter than
-// validAppName because vsn is spliced raw into the generated /bin/sh launcher
-// scripts (StartScript/StopScript) — it must reject shell metacharacters
-// ($, backtick, quotes, spaces), not just path separators.
-func validVsn(s string) bool { return vsnRE.MatchString(s) }
+// validVsn reports whether s is a safe version string. Like validAppName it
+// rejects shell/Erlang-dangerous characters, but via a stricter whitelist
+// (^[A-Za-z0-9._-]+$) rather than a blacklist, because vsn is spliced raw into
+// the generated /bin/sh launcher scripts (StartScript/StopScript). It also
+// rejects "..".
+func validVsn(s string) bool { return vsnRE.MatchString(s) && !strings.Contains(s, "..") }
 
 // commands lists the subcommands wm will support. build and erlang are real;
 // the rest are stubs for now.
@@ -457,8 +458,8 @@ func resolveApp(args []string) (string, []string, error) {
 	entries, _ := os.ReadDir(dir)
 	var apps []string
 	for _, e := range entries {
-		if strings.HasSuffix(e.Name(), ".json") {
-			apps = append(apps, strings.TrimSuffix(e.Name(), ".json"))
+		if name, ok := strings.CutSuffix(e.Name(), ".json"); ok {
+			apps = append(apps, name)
 		}
 	}
 	switch len(apps) {
@@ -474,27 +475,46 @@ func resolveApp(args []string) (string, []string, error) {
 // ctrlNode returns a unique-ish control node name for a short-lived erl.
 func ctrlNode() string { return "wmctrl@127.0.0.1" }
 
+// controlTarget resolves the target of a control-node command: the app name, its
+// persisted node state, and the erlang layout. It validates --version in one
+// shared place (previously stop/status/attach skipped ValidateVersion). Used by
+// stop/status/attach; call does its own arg parsing but reuses cookieArgsFile.
+func controlTarget(args []string) (app string, st NodeState, l erlang.Layout, err error) {
+	app, rest, err := resolveApp(args)
+	if err != nil {
+		return "", NodeState{}, erlang.Layout{}, err
+	}
+	version, _, err := parseVersionFlag(rest)
+	if err != nil {
+		return "", NodeState{}, erlang.Layout{}, err
+	}
+	if err = erlang.ValidateVersion(version); err != nil {
+		return "", NodeState{}, erlang.Layout{}, err
+	}
+	st, err = readState(app)
+	if err != nil {
+		return "", NodeState{}, erlang.Layout{}, err
+	}
+	home, _ := os.UserHomeDir()
+	return app, st, erlang.NewLayout(home, version), nil
+}
+
 // stopCmd reads the State-File for the target app, tells its node to shut
 // down via a short-lived control node doing rpc:call(Node, init, stop, []),
 // then removes the State-File.
 func stopCmd(ctx context.Context, args []string, stdout io.Writer) error {
-	app, rest, err := resolveApp(args)
+	app, st, l, err := controlTarget(args)
 	if err != nil {
 		return err
 	}
-	version, _, err := parseVersionFlag(rest)
+	cf, cleanup, err := cookieArgsFile(st.Cookie)
 	if err != nil {
 		return err
 	}
-	st, err := readState(app)
-	if err != nil {
-		return err
-	}
-	home, _ := os.UserHomeDir()
-	l := erlang.NewLayout(home, version)
+	defer cleanup()
 	eval := fmt.Sprintf("rpc:call('%s', init, stop, []), init:stop().", st.Node)
 	if err := runErl(ctx, ".", l.Erl(), "-name", ctrlNode(),
-		"-setcookie", st.Cookie, "-noshell", "-eval", eval); err != nil {
+		"-args_file", cf, "-noshell", "-eval", eval); err != nil {
 		return err
 	}
 	if err := removeState(app); err != nil {
@@ -507,26 +527,21 @@ func stopCmd(ctx context.Context, args []string, stdout io.Writer) error {
 // statusCmd pings the target app's node and lists its running applications
 // via a short-lived control node, printing the captured report to stdout.
 func statusCmd(ctx context.Context, args []string, stdout io.Writer) error {
-	app, rest, err := resolveApp(args)
+	app, st, l, err := controlTarget(args)
 	if err != nil {
 		return err
 	}
-	version, _, err := parseVersionFlag(rest)
+	cf, cleanup, err := cookieArgsFile(st.Cookie)
 	if err != nil {
 		return err
 	}
-	st, err := readState(app)
-	if err != nil {
-		return err
-	}
-	home, _ := os.UserHomeDir()
-	l := erlang.NewLayout(home, version)
+	defer cleanup()
 	eval := fmt.Sprintf(
 		"io:format(\"~p~n\", [net_adm:ping('%s')]), "+
 			"io:format(\"~p~n\", [rpc:call('%s', application, which_applications, [])]), "+
 			"init:stop().", st.Node, st.Node)
 	out, err := captureErl(ctx, ".", l.Erl(), "-name", ctrlNode(),
-		"-setcookie", st.Cookie, "-noshell", "-eval", eval)
+		"-args_file", cf, "-noshell", "-eval", eval)
 	if err != nil {
 		return fmt.Errorf("status query failed: %w", err)
 	}
@@ -560,12 +575,20 @@ func callCmd(ctx context.Context, args []string, stdout io.Writer) error {
 			return err
 		}
 	}
+	if err := erlang.ValidateVersion(version); err != nil {
+		return err
+	}
 	st, err := readState(app)
 	if err != nil {
 		return err
 	}
 	home, _ := os.UserHomeDir()
 	l := erlang.NewLayout(home, version)
+	cf, cleanup, err := cookieArgsFile(st.Cookie)
+	if err != nil {
+		return err
+	}
+	defer cleanup()
 	// The control node is fresh, so it must connect to the target node and
 	// converge the global name registry before {global, <name>} resolves. After
 	// a detached boot the registration is not instant, so poll net_adm:ping +
@@ -580,7 +603,7 @@ func callCmd(ctx context.Context, args []string, stdout io.Writer) error {
 			"io:format(\"~s~n\", [gen_server:call({global, %s}, <<%q>>)]), init:stop().",
 		st.Node, name, name, req)
 	out, err := captureErl(ctx, ".", l.Erl(), "-name", ctrlNode(),
-		"-setcookie", st.Cookie, "-noshell", "-eval", eval)
+		"-args_file", cf, "-noshell", "-eval", eval)
 	if err != nil {
 		return fmt.Errorf("call failed: %w", err)
 	}
@@ -592,23 +615,18 @@ func callCmd(ctx context.Context, args []string, stdout io.Writer) error {
 // to the real terminal, so the user gets a live Erlang shell. Detaching leaves
 // the node running.
 func attachCmd(ctx context.Context, args []string, stdout io.Writer) error {
-	app, rest, err := resolveApp(args)
+	_, st, l, err := controlTarget(args)
 	if err != nil {
 		return err
 	}
-	version, _, err := parseVersionFlag(rest)
+	cf, cleanup, err := cookieArgsFile(st.Cookie)
 	if err != nil {
 		return err
 	}
-	st, err := readState(app)
-	if err != nil {
-		return err
-	}
-	home, _ := os.UserHomeDir()
-	l := erlang.NewLayout(home, version)
+	defer cleanup()
 	// A unique-per-invocation control node avoids clashing with a prior attach.
 	ctrl := "wmattach@127.0.0.1"
-	return attachErl(ctx, ".", l.Erl(), "-remsh", st.Node, "-name", ctrl, "-setcookie", st.Cookie)
+	return attachErl(ctx, ".", l.Erl(), "-remsh", st.Node, "-name", ctrl, "-args_file", cf)
 }
 
 // parseOutFlag pulls an optional --out DIR out of args (default "bin").

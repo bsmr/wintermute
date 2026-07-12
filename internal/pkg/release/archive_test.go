@@ -1,10 +1,13 @@
 package release
 
 import (
+	"archive/tar"
 	"bytes"
+	"compress/gzip"
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -49,5 +52,27 @@ func TestTarGzUntarRoundTrip(t *testing.T) {
 	b, _ := os.ReadFile(filepath.Join(dst, "note.txt"))
 	if string(b) != "hi" {
 		t.Errorf("note.txt content = %q", b)
+	}
+}
+
+func TestUntarRejectsUnsafeSymlink(t *testing.T) {
+	// Cover both guard branches: a traversing (..) and an absolute link target.
+	for _, link := range []string{"../../etc/passwd", "/etc/passwd"} {
+		var buf bytes.Buffer
+		tw := tar.NewWriter(&buf)
+		if err := tw.WriteHeader(&tar.Header{
+			Name: "evil", Typeflag: tar.TypeSymlink, Linkname: link, Mode: 0o777,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		tw.Close()
+		var gz bytes.Buffer
+		zw := gzip.NewWriter(&gz)
+		zw.Write(buf.Bytes())
+		zw.Close()
+		err := Untar(&gz, t.TempDir())
+		if err == nil || !strings.Contains(err.Error(), "unsafe symlink") {
+			t.Fatalf("Linkname %q: expected unsafe-symlink rejection, got %v", link, err)
+		}
 	}
 }
