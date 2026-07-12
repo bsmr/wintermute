@@ -55,3 +55,34 @@ func ParseManifest(data []byte) (Manifest, error) {
 	err := json.Unmarshal(data, &m)
 	return m, err
 }
+
+// StartErlData is the releases/start_erl.data content: "<erts-vsn> <rel-vsn>".
+func StartErlData(ertsVsn, relVsn string) string {
+	return fmt.Sprintf("%s %s\n", ertsVsn, relVsn)
+}
+
+// StartScript is a self-locating bin/start: it computes the target root from its
+// own path, finds the bundled erts, and boots the release detached. No -setcookie
+// (erl uses ~/.erlang.cookie), so the tarball carries no secret.
+func StartScript(vsn string) string {
+	return `#!/bin/sh
+HERE=$(cd "$(dirname "$0")/.." && pwd)
+ERTS=$(basename "$HERE"/erts-*)
+exec "$HERE/$ERTS/bin/erl" -detached -boot "$HERE/releases/` + vsn + `/start" \
+  -config "$HERE/releases/` + vsn + `/sys.config" \
+  -args_file "$HERE/releases/` + vsn + `/vm.args"
+`
+}
+
+// StopScript is a self-locating bin/stop: a short-lived control node (booted with
+// the bundled start_clean) that rpc-stops the release node. It shares the node's
+// ~/.erlang.cookie automatically on the same host.
+func StopScript(node, vsn string) string {
+	return `#!/bin/sh
+HERE=$(cd "$(dirname "$0")/.." && pwd)
+ERTS=$(basename "$HERE"/erts-*)
+exec "$HERE/$ERTS/bin/erl" -boot "$HERE/releases/` + vsn + `/start_clean" \
+  -name "wmstop_$$@127.0.0.1" -noshell \
+  -eval "rpc:call('` + node + `', init, stop, []), init:stop()."
+`
+}

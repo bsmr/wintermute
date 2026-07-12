@@ -16,10 +16,11 @@ import (
 	"go.muehmer.eu/wintermute/internal/pkg/transpile"
 )
 
-// atomRE and nodeRE are compiled once and reused by validAtom/validNodeName.
+// atomRE, nodeRE and vsnRE are compiled once and reused by the validators.
 var (
 	atomRE = regexp.MustCompile(`^[a-z][a-zA-Z0-9_]*$`)
 	nodeRE = regexp.MustCompile(`^[a-zA-Z0-9_]+@[A-Za-z0-9_.-]+$`)
+	vsnRE  = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
 )
 
 // validAtom reports whether s is a plain lowercase Erlang atom, safe to splice
@@ -29,6 +30,12 @@ func validAtom(s string) bool { return atomRE.MatchString(s) }
 // validNodeName reports whether s is a safe Erlang node name (name@host),
 // safe to splice unquoted (inside single quotes) into an `erl -eval` string.
 func validNodeName(s string) bool { return nodeRE.MatchString(s) }
+
+// validVsn reports whether s is a safe version string. It is stricter than
+// validAppName because vsn is spliced raw into the generated /bin/sh launcher
+// scripts (StartScript/StopScript) — it must reject shell metacharacters
+// ($, backtick, quotes, spaces), not just path separators.
+func validVsn(s string) bool { return vsnRE.MatchString(s) }
 
 // commands lists the subcommands wm will support. build and erlang are real;
 // the rest are stubs for now.

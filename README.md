@@ -58,6 +58,12 @@ wm status echo         # is it up? which apps run?
 wm call --app echo echo hello  # cross-node gen_server:call({global, echo}, ...)
 wm attach echo         # interactive remote shell (detach leaves it running)
 wm stop echo           # clean shutdown
+
+# Build a self-contained target system that runs on a host with NO Erlang
+wm release echo_app.go echo_sup.go echo_server.go --out build/echo --self-contained
+#   -> build/echo/echo-<vsn>.tar.gz  (bundles ERTS + all apps)
+# On the target host (no Erlang needed):
+tar xzf echo-<vsn>.tar.gz && ./echo-<vsn>/bin/start   # ./echo-<vsn>/bin/stop to shut down
 ```
 
 ---

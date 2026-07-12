@@ -1,6 +1,9 @@
 package release
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestRelResource(t *testing.T) {
 	got := RelResource("echo", "0.2.5", "17.0.3", []AppVsn{
@@ -44,5 +47,45 @@ func TestManifestRoundTrip(t *testing.T) {
 func TestParseManifestBad(t *testing.T) {
 	if _, err := ParseManifest([]byte("{not json")); err == nil {
 		t.Fatal("ParseManifest should error on bad JSON")
+	}
+}
+
+func TestStartErlData(t *testing.T) {
+	if got := StartErlData("17.0.3", "0.2.6"); got != "17.0.3 0.2.6\n" {
+		t.Fatalf("StartErlData = %q", got)
+	}
+}
+
+func TestStartScript(t *testing.T) {
+	s := StartScript("0.2.6")
+	for _, want := range []string{
+		"#!/bin/sh",
+		`HERE=$(cd "$(dirname "$0")/.." && pwd)`,
+		`erts-*`,
+		"-detached",
+		"releases/0.2.6/start",
+		"releases/0.2.6/sys.config",
+		"releases/0.2.6/vm.args",
+	} {
+		if !strings.Contains(s, want) {
+			t.Errorf("StartScript missing %q:\n%s", want, s)
+		}
+	}
+	if strings.Contains(s, "-setcookie") {
+		t.Errorf("StartScript must not set a cookie (uses ~/.erlang.cookie):\n%s", s)
+	}
+}
+
+func TestStopScript(t *testing.T) {
+	s := StopScript("echo@127.0.0.1", "0.2.6")
+	for _, want := range []string{
+		"#!/bin/sh",
+		"releases/0.2.6/start_clean",
+		"'echo@127.0.0.1'",
+		"init, stop",
+	} {
+		if !strings.Contains(s, want) {
+			t.Errorf("StopScript missing %q:\n%s", want, s)
+		}
 	}
 }

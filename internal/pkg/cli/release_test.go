@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"go.muehmer.eu/wintermute/internal/pkg/release"
 )
 
 // stubErlc records erlc calls and creates the .beam so downstream steps proceed,
@@ -94,6 +96,23 @@ func TestReleaseRejectsTraversalVsn(t *testing.T) {
 	}
 	if _, statErr := os.Stat(filepath.Join(out, "releases")); statErr == nil {
 		t.Fatalf("traversal --vsn built a releases dir; guard fired too late")
+	}
+}
+
+// TestReleaseRejectsShellMetacharVsn guards against shell injection: vsn is
+// spliced raw into the generated /bin/sh launcher scripts, so a shell
+// metacharacter must be rejected (validAppName alone allowed it — it only blocks
+// path separators).
+func TestReleaseRejectsShellMetacharVsn(t *testing.T) {
+	for _, bad := range []string{"$(touch pwned)", "1.0`id`", `a"b`, "a b"} {
+		src := writeEchoAppSources(t)
+		out := filepath.Join(t.TempDir(), "rel")
+		var buf bytes.Buffer
+		args := append([]string{"--out", out, "--vsn", bad, "--name", "echo@127.0.0.1"}, src...)
+		err := releaseCmd(context.Background(), args, &buf)
+		if err == nil || !strings.Contains(err.Error(), "invalid vsn") {
+			t.Errorf("releaseCmd --vsn %q: err = %v, want 'invalid vsn'", bad, err)
+		}
 	}
 }
 
@@ -212,6 +231,175 @@ func TestReleaseTarInvokesMakeTar(t *testing.T) {
 	}
 	if !sawTar {
 		t.Errorf("--tar did not invoke make_tar; evals=%v", evals)
+	}
+}
+
+func TestReleaseSelfContainedRelAndEvals(t *testing.T) {
+	stubErlc(t)
+	var evals []string
+	orig := captureErl
+	captureErl = func(_ context.Context, dir, _ string, a ...string) ([]byte, error) {
+		joined := strings.Join(a, " ")
+		for i, x := range a {
+			if x == "-eval" {
+				evals = append(evals, a[i+1])
+			}
+		}
+		// The self-contained path now also runs assembleTargetSystem after
+		// make_tar; materialise what it expects to unpack/regenerate so the
+		// wiring under test (not just the eval strings) runs to completion.
+		switch {
+		case strings.Contains(joined, "make_tar"):
+			writeFakeBundleTar(t, filepath.Join(dir, "echo.tar.gz"), "0.2.6")
+		case strings.Contains(joined, `make_script("start_clean"`):
+			os.WriteFile(filepath.Join(dir, "start_clean.boot"), []byte("CLEAN"), 0o644)
+		case strings.Contains(joined, "create_RELEASES"):
+			os.MkdirAll(filepath.Join(dir, "releases"), 0o755)
+			os.WriteFile(filepath.Join(dir, "releases", "RELEASES"), []byte("RELEASES"), 0o644)
+		}
+		return []byte("ok"), nil
+	}
+	t.Cleanup(func() { captureErl = orig })
+
+	home := t.TempDir()
+	lib := filepath.Join(home, ".local", "erlang", "29.0.3", "lib", "erlang")
+	for _, d := range []string{"erts-17.0.3", "lib/kernel-11.0.3", "lib/stdlib-8.0.2", "lib/sasl-4.4"} {
+		if err := os.MkdirAll(filepath.Join(lib, d), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, f := range []string{"erl", "epmd", "run_erl", "to_erl"} {
+		if err := os.MkdirAll(filepath.Join(lib, "bin"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(lib, "bin", f), []byte("x"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("HOME", home)
+
+	src := writeEchoAppSources(t)
+	out := filepath.Join(t.TempDir(), "rel")
+	args := append([]string{"--out", out, "--vsn", "0.2.6", "--self-contained"}, src...)
+	if err := releaseCmd(context.Background(), args, &bytes.Buffer{}); err != nil {
+		t.Fatalf("releaseCmd --self-contained: %v", err)
+	}
+
+	// .rel must include sasl.
+	rel, _ := os.ReadFile(filepath.Join(out, "releases/0.2.6/echo.rel"))
+	if !strings.Contains(string(rel), "{sasl,") {
+		t.Errorf("self-contained .rel must include sasl:\n%s", rel)
+	}
+	// make_script must be NON-local; make_tar must bundle erts.
+	var sawScript, sawTar bool
+	for _, e := range evals {
+		if strings.Contains(e, "make_script") {
+			sawScript = true
+			if strings.Contains(e, "local") {
+				t.Errorf("self-contained make_script must NOT use local:\n%s", e)
+			}
+		}
+		if strings.Contains(e, "make_tar") {
+			sawTar = true
+			if !strings.Contains(e, "{erts,") {
+				t.Errorf("self-contained make_tar must bundle erts:\n%s", e)
+			}
+		}
+	}
+	if !sawScript || !sawTar {
+		t.Errorf("expected make_script and make_tar evals; got %v", evals)
+	}
+}
+
+func TestReleaseSelfContainedAssemblesTargetSystem(t *testing.T) {
+	stubErlc(t)
+	home := t.TempDir()
+	lib := filepath.Join(home, ".local", "erlang", "29.0.3", "lib", "erlang")
+	for _, d := range []string{"erts-17.0.3", "lib/kernel-11.0.3", "lib/stdlib-8.0.2", "lib/sasl-4.4"} {
+		os.MkdirAll(filepath.Join(lib, d), 0o755)
+	}
+	// Fake OTP bin/ launchers WriteLauncherLayout will copy.
+	for _, f := range []string{"erl", "epmd", "run_erl", "to_erl"} {
+		os.WriteFile(filepath.Join(lib, "bin", f), []byte("x"), 0o755)
+	}
+	os.MkdirAll(filepath.Join(lib, "bin"), 0o755)
+	for _, f := range []string{"erl", "epmd", "run_erl", "to_erl"} {
+		os.WriteFile(filepath.Join(lib, "bin", f), []byte("x"), 0o755)
+	}
+	t.Setenv("HOME", home)
+
+	out := filepath.Join(t.TempDir(), "rel")
+
+	// captureErl stub: on make_tar, write a realistic bundle tar.gz to relDir; on
+	// make_script for start_clean, write a fake start_clean.boot; on create_RELEASES,
+	// write a fake releases/RELEASES so the final repack has one to bundle
+	// (the brief's stub note calls this step a "no-op" for the erl side, but the
+	// unpacked target system must still end up with the file the assertion below
+	// checks for).
+	orig := captureErl
+	captureErl = func(_ context.Context, dir, _ string, a ...string) ([]byte, error) {
+		joined := strings.Join(a, " ")
+		switch {
+		case strings.Contains(joined, "make_tar"):
+			writeFakeBundleTar(t, filepath.Join(dir, "echo.tar.gz"), "0.2.6")
+		case strings.Contains(joined, `make_script("start_clean"`):
+			os.WriteFile(filepath.Join(dir, "start_clean.boot"), []byte("CLEAN"), 0o644)
+		case strings.Contains(joined, "create_RELEASES"):
+			os.MkdirAll(filepath.Join(dir, "releases"), 0o755)
+			os.WriteFile(filepath.Join(dir, "releases", "RELEASES"), []byte("RELEASES"), 0o644)
+		}
+		return []byte("ok"), nil
+	}
+	t.Cleanup(func() { captureErl = orig })
+
+	src := writeEchoAppSources(t)
+	args := append([]string{"--out", out, "--vsn", "0.2.6", "--self-contained"}, src...)
+	if err := releaseCmd(context.Background(), args, &bytes.Buffer{}); err != nil {
+		t.Fatalf("releaseCmd: %v", err)
+	}
+
+	// Final artifact exists; unpack and assert the target-system layout.
+	f, err := os.Open(filepath.Join(out, "echo-0.2.6.tar.gz"))
+	if err != nil {
+		t.Fatalf("final tarball missing: %v", err)
+	}
+	defer f.Close()
+	got := t.TempDir()
+	if err := release.Untar(f, got); err != nil {
+		t.Fatal(err)
+	}
+	// The tarball unpacks into a self-named <app>-<vsn>/ directory.
+	root := filepath.Join(got, "echo-0.2.6")
+	for _, p := range []string{
+		"bin/start", "bin/stop", "bin/erl",
+		"releases/start_erl.data",
+		"releases/0.2.6/start.boot",
+		"releases/RELEASES",
+	} {
+		if _, err := os.Stat(filepath.Join(root, p)); err != nil {
+			t.Errorf("target system missing %s: %v", p, err)
+		}
+	}
+}
+
+// writeFakeBundleTar writes a .tar.gz mimicking systools:make_tar {erts} output:
+// erts-*/, lib/, releases/<vsn>/echo.boot.
+func writeFakeBundleTar(t *testing.T, path, vsn string) {
+	t.Helper()
+	stage := t.TempDir()
+	os.MkdirAll(filepath.Join(stage, "erts-17.0.3", "bin"), 0o755)
+	os.WriteFile(filepath.Join(stage, "erts-17.0.3", "bin", "erl"), []byte("x"), 0o755)
+	os.MkdirAll(filepath.Join(stage, "lib", "echo-"+vsn, "ebin"), 0o755)
+	os.MkdirAll(filepath.Join(stage, "releases", vsn), 0o755)
+	os.WriteFile(filepath.Join(stage, "releases", vsn, "echo.boot"), []byte("BOOT"), 0o644)
+	os.WriteFile(filepath.Join(stage, "releases", vsn, "echo.rel"), []byte("{release,...}."), 0o644)
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if err := release.TarGz(stage, f); err != nil {
+		t.Fatal(err)
 	}
 }
 
