@@ -11,6 +11,7 @@ import (
 	"go/token"
 	"maps"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -325,6 +326,20 @@ func (em *emitter) emitStmts(list []ast.Stmt, isTail bool) (string, error) {
 			parts = append(parts, e)
 			return strings.Join(parts, ",\n"), nil // an if consumes the rest of the sequence
 		}
+		if sw, ok := s.(*ast.SwitchStmt); ok {
+			if !isTail {
+				return "", em.errorf(sw, "control flow (switch) is only supported in tail position")
+			}
+			if i != len(list)-1 {
+				return "", em.errorf(list[i+1], "unreachable statement after a switch")
+			}
+			e, err := em.emitSwitch(sw)
+			if err != nil {
+				return "", err
+			}
+			parts = append(parts, e)
+			return strings.Join(parts, ",\n"), nil
+		}
 		if ret, ok := s.(*ast.ReturnStmt); ok {
 			if !isTail || i != len(list)-1 {
 				return "", em.errorf(ret, "early return is unsupported; put it in an if branch (0.3.2)")
@@ -401,10 +416,12 @@ func (em *emitter) emitIf(is *ast.IfStmt, cont []ast.Stmt) (string, error) {
 }
 
 // terminates reports whether a statement list ends in a construct that yields
-// the function's value and does not fall through: a return, or an if/else whose
-// both branches terminate. A bare if (no else) falls through, so it does not
-// terminate. Used to reject a bare-if then-branch that would fall through to the
-// continuation (Go semantics) but be emitted as a terminal case clause (Erlang).
+// the function's value and does not fall through: a return, an if/else whose
+// both branches terminate, or an exhaustive switch (a default plus every clause
+// terminating). A bare if (no else), or a switch without a default, falls
+// through and so does not terminate. Used to reject a bare-if then-branch that
+// would fall through to the continuation (Go semantics) but be emitted as a
+// terminal case clause (Erlang).
 func terminates(list []ast.Stmt) bool {
 	if len(list) == 0 {
 		return false
@@ -415,6 +432,21 @@ func terminates(list []ast.Stmt) bool {
 	case *ast.IfStmt:
 		els, ok := s.Else.(*ast.BlockStmt)
 		return ok && terminates(s.Body.List) && terminates(els.List)
+	case *ast.SwitchStmt:
+		hasDefault := false
+		for _, cc := range s.Body.List {
+			clause, ok := cc.(*ast.CaseClause)
+			if !ok {
+				return false
+			}
+			if clause.List == nil {
+				hasDefault = true
+			}
+			if !terminates(clause.Body) {
+				return false
+			}
+		}
+		return hasDefault
 	default:
 		return false
 	}
@@ -429,6 +461,91 @@ func (em *emitter) emitBranch(list []ast.Stmt) (string, error) {
 	snap := maps.Clone(em.bound)
 	defer func() { em.bound = snap }()
 	return em.emitStmts(list, true)
+}
+
+// emitSwitch emits a tagged expression switch as an Erlang `case Tag of V ->
+// clause; … ; _ -> default end`. Only the tagged form is supported: single
+// literal case values, a required default (emitted as the catch-all `_` and
+// sorted last), each clause body emitted in its own binding scope via
+// emitBranch. A type switch is a distinct node handled in emitStmt.
+func (em *emitter) emitSwitch(sw *ast.SwitchStmt) (string, error) {
+	if sw.Init != nil {
+		return "", em.errorf(sw, "switch with an init statement is unsupported (0.3.4+)")
+	}
+	if sw.Tag == nil {
+		return "", em.errorf(sw, "tagless switch is unsupported (0.3.4+); use if")
+	}
+	tag, err := em.emitExpr(sw.Tag)
+	if err != nil {
+		return "", err
+	}
+	var clauses []string // non-default clauses, in source order
+	var deflt string
+	haveDefault := false
+	for _, s := range sw.Body.List {
+		cc, ok := s.(*ast.CaseClause)
+		if !ok {
+			return "", em.errorf(s, "unsupported switch clause")
+		}
+		if ft := switchFallthrough(cc.Body); ft != nil {
+			return "", em.errorf(ft, "fallthrough is unsupported")
+		}
+		if len(cc.Body) == 0 {
+			return "", em.errorf(cc, "case clause has no value (empty body)")
+		}
+		if cc.List == nil { // default clause
+			if haveDefault {
+				return "", em.errorf(cc, "switch has more than one default")
+			}
+			haveDefault = true
+			deflt, err = em.emitBranch(cc.Body)
+			if err != nil {
+				return "", err
+			}
+			continue
+		}
+		if len(cc.List) != 1 {
+			return "", em.errorf(cc, "multi-value case is unsupported (0.3.4+)")
+		}
+		lit, ok := cc.List[0].(*ast.BasicLit)
+		if !ok {
+			return "", em.errorf(cc.List[0], "case value must be an int or string literal")
+		}
+		val, err := em.emitExpr(lit)
+		if err != nil {
+			return "", err
+		}
+		body, err := em.emitBranch(cc.Body)
+		if err != nil {
+			return "", err
+		}
+		clauses = append(clauses, val+" -> "+body)
+	}
+	if !haveDefault {
+		return "", em.errorf(sw, "switch needs a default clause")
+	}
+	clauses = append(clauses, "_ -> "+deflt)
+	var b strings.Builder
+	b.WriteString("case " + tag + " of\n")
+	for i, c := range clauses {
+		b.WriteString(indent(c))
+		if i < len(clauses)-1 {
+			b.WriteString(";")
+		}
+		b.WriteString("\n")
+	}
+	b.WriteString("end")
+	return b.String(), nil
+}
+
+// switchFallthrough returns the fallthrough statement in a case body, or nil.
+func switchFallthrough(body []ast.Stmt) *ast.BranchStmt {
+	for _, s := range body {
+		if br, ok := s.(*ast.BranchStmt); ok && br.Tok == token.FALLTHROUGH {
+			return br
+		}
+	}
+	return nil
 }
 
 // receiveHead recognizes a leading `x := otp.Receive().(T)` statement, returns
@@ -508,6 +625,8 @@ func (em *emitter) emitStmt(s ast.Stmt) (string, error) {
 		}
 		em.bound[id.Name] = true
 		return id.Name + " = " + rhs, nil
+	case *ast.TypeSwitchStmt:
+		return "", em.errorf(st, "type switch is unsupported (0.3.4+)")
 	default:
 		return "", em.errorf(s, "unsupported statement: %T", s)
 	}
@@ -556,7 +675,15 @@ func (em *emitter) emitExpr(e ast.Expr) (string, error) {
 		case token.STRING:
 			return "<<" + ex.Value + ">>", nil // ex.Value keeps the quotes
 		case token.INT:
-			return ex.Value, nil
+			// Normalize every Go integer literal (decimal, 0-octal, 0o/0x/0b,
+			// digit separators) to a plain decimal Erlang integer. Emitting the
+			// Go spelling verbatim is wrong (Erlang reads 0777 as 777) or invalid
+			// (0x1F). base 0 lets ParseInt auto-detect Go's prefixes/underscores.
+			n, err := strconv.ParseInt(ex.Value, 0, 64)
+			if err != nil {
+				return "", em.errorf(ex, "unsupported integer literal %s: %v", ex.Value, err)
+			}
+			return strconv.FormatInt(n, 10), nil
 		}
 		return "", em.errorf(ex, "unsupported literal: %s", ex.Value)
 	case *ast.BinaryExpr:

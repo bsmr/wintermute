@@ -1069,6 +1069,33 @@ func F(N int) int {
 	}
 }
 
+func TestModule_BareIfSwitchThenAccepted(t *testing.T) {
+	// A bare-if whose then-branch is an exhaustive switch (a default plus
+	// every clause returning) yields a value and does not fall through, exactly
+	// like an if/else with two terminating branches. terminates() must treat it
+	// as terminating so this valid, exhaustively-returning Go is accepted rather
+	// than rejected with the "fall through" error.
+	src := `package m
+func F(N int) string {
+	if N > 0 {
+		switch N {
+		case 1:
+			return "one"
+		default:
+			return "many"
+		}
+	}
+	return "non-positive"
+}`
+	out, err := Module(src)
+	if err != nil {
+		t.Fatalf("want bare-if-with-switch-then accepted, got %v", err)
+	}
+	if !strings.Contains(out.Erl, "case N > 0 of") || !strings.Contains(out.Erl, "case N of") {
+		t.Fatalf("want both the bare-if case and the nested switch case, got:\n%s", out.Erl)
+	}
+}
+
 func TestModule_UnreachableAfterIfElseRejected(t *testing.T) {
 	src := `package m
 func F(N int) int {
@@ -1130,5 +1157,246 @@ func Handle(N int) int {
 	_, err := Module(src)
 	if err == nil || !strings.Contains(err.Error(), "tail position") {
 		t.Fatalf("want non-tail-if rejection, got %v", err)
+	}
+}
+
+func TestModule_Switch(t *testing.T) {
+	src := `package m
+func Classify(N int) string {
+	switch N {
+	case 1:
+		return "one"
+	case 2:
+		return "two"
+	default:
+		return "many"
+	}
+}`
+	r, err := Module(src)
+	if err != nil {
+		t.Fatalf("Module: %v", err)
+	}
+	for _, want := range []string{"case N of", "1 -> <<\"one\">>", "2 -> <<\"two\">>", "_ -> <<\"many\">>", "end"} {
+		if !strings.Contains(r.Erl, want) {
+			t.Errorf("want %q, got:\n%s", want, r.Erl)
+		}
+	}
+}
+
+func TestModule_SwitchDefaultReorderedLast(t *testing.T) {
+	// default is written first in Go; Erlang requires the catch-all last.
+	src := `package m
+func F(N int) int {
+	switch N {
+	default:
+		return 0
+	case 1:
+		return 1
+	}
+}`
+	r, err := Module(src)
+	if err != nil {
+		t.Fatalf("Module: %v", err)
+	}
+	i1 := strings.Index(r.Erl, "1 -> 1")
+	id := strings.Index(r.Erl, "_ -> 0")
+	if i1 < 0 || id < 0 || id < i1 {
+		t.Errorf("default (_ -> 0) must come after case 1, got:\n%s", r.Erl)
+	}
+}
+
+func TestModule_SwitchRejections(t *testing.T) {
+	cases := []struct{ name, src, want string }{
+		{"tagless", `package m
+func F(N int) int { switch { case N == 1: return 1; default: return 0 } }`, "tagless"},
+		{"init", `package m
+func F(N int) int { switch M := N; M { case 1: return 1; default: return 0 } }`, "init"},
+		{"multi-value", `package m
+func F(N int) int { switch N { case 1, 2: return 1; default: return 0 } }`, "multi-value"},
+		{"non-literal value", `package m
+func F(N int) int { switch N { case N: return 1; default: return 0 } }`, "literal"},
+		{"empty clause", `package m
+func F(N int) int {
+	switch N {
+	case 1:
+	default:
+		return 0
+	}
+}`, "empty body"},
+		{"fallthrough", `package m
+func F(N int) int { switch N { case 1: fallthrough; default: return 0 } }`, "fallthrough"},
+		{"missing default", `package m
+func F(N int) int { switch N { case 1: return 1 } }`, "default"},
+		{"type switch", `package m
+func F(X interface{}) int { switch X.(type) { case int: return 1; default: return 0 } }`, "type switch"},
+	}
+	for _, c := range cases {
+		_, err := Module(c.src)
+		if err == nil || !strings.Contains(err.Error(), c.want) {
+			t.Errorf("%s: want error containing %q, got %v", c.name, c.want, err)
+		}
+	}
+}
+
+func TestModule_SwitchUnreachableAfterRejected(t *testing.T) {
+	src := `package m
+func F(N int) int {
+	switch N {
+	case 1:
+		return 1
+	default:
+		return 0
+	}
+	return N
+}`
+	_, err := Module(src)
+	if err == nil || !strings.Contains(err.Error(), "unreachable") {
+		t.Fatalf("want unreachable rejection, got %v", err)
+	}
+}
+
+func TestModule_SwitchNonTailRejected(t *testing.T) {
+	src := `package m
+import "go.muehmer.eu/wintermute/pkg/otp"
+type Msg struct { X int }
+func Handle(N int) int {
+	switch N {
+	case 1:
+		return 1
+	default:
+		return 0
+	}
+	M := otp.Receive().(Msg)
+	return M.X
+}`
+	_, err := Module(src)
+	if err == nil || !strings.Contains(err.Error(), "tail position") {
+		t.Fatalf("want non-tail rejection, got %v", err)
+	}
+}
+
+func TestModule_SwitchSiblingReuse(t *testing.T) {
+	src := `package m
+func F(N int) int {
+	switch N {
+	case 1:
+		Z := 10
+		return Z
+	default:
+		Z := 20
+		return Z
+	}
+}`
+	r, err := Module(src)
+	if err != nil {
+		t.Fatalf("want sibling reuse accepted, got %v", err)
+	}
+	if !strings.Contains(r.Erl, "Z = 10") || !strings.Contains(r.Erl, "Z = 20") {
+		t.Errorf("got:\n%s", r.Erl)
+	}
+}
+
+func TestModule_SwitchClauseOuterCollisionRejected(t *testing.T) {
+	src := `package m
+func F(Z int) int {
+	switch Z {
+	case 1:
+		Z := 10
+		return Z
+	default:
+		return Z
+	}
+}`
+	_, err := Module(src)
+	if err == nil || !strings.Contains(err.Error(), "already bound") {
+		t.Fatalf("want outer-collision rejection, got %v", err)
+	}
+}
+
+// String case values become Erlang binary patterns (spec Testing item; the
+// final review confirmed these compile and run under erlc but no test locked it).
+func TestModule_SwitchStringCase(t *testing.T) {
+	src := `package m
+func F(S string) int {
+	switch S {
+	case "hi":
+		return 1
+	default:
+		return 0
+	}
+}`
+	r, err := Module(src)
+	if err != nil {
+		t.Fatalf("Module: %v", err)
+	}
+	if !strings.Contains(r.Erl, "<<\"hi\">> -> 1") {
+		t.Errorf("want <<\"hi\">> -> 1, got:\n%s", r.Erl)
+	}
+}
+
+// The switch tag may be a receive-bound field (switch over M.X inside a receive
+// clause body): the field name is the Erlang case subject.
+func TestModule_SwitchReceiveFieldTag(t *testing.T) {
+	src := `package m
+import "go.muehmer.eu/wintermute/pkg/otp"
+type Msg struct { X int }
+func Handle() int {
+	M := otp.Receive().(Msg)
+	switch M.X {
+	case 1:
+		return 1
+	default:
+		return 0
+	}
+}`
+	r, err := Module(src)
+	if err != nil {
+		t.Fatalf("Module: %v", err)
+	}
+	if !strings.Contains(r.Erl, "case X of") {
+		t.Errorf("want case over the received field X, got:\n%s", r.Erl)
+	}
+}
+
+func TestModule_IntLiteralBases(t *testing.T) {
+	cases := []struct{ goLit, erl string }{
+		{"0777", "511"},   // octal (leading 0)
+		{"0o17", "15"},    // octal (0o)
+		{"0x1F", "31"},    // hex
+		{"0b101", "5"},    // binary
+		{"1_000", "1000"}, // digit separators
+		{"42", "42"},      // decimal unchanged
+	}
+	for _, c := range cases {
+		src := "package m\nfunc F() int { return " + c.goLit + " }"
+		r, err := Module(src)
+		if err != nil {
+			t.Fatalf("%s: Module: %v", c.goLit, err)
+		}
+		want := "f() -> " + c.erl + "."
+		if !strings.Contains(r.Erl, want) {
+			t.Errorf("%s: want %q, got:\n%s", c.goLit, want, r.Erl)
+		}
+	}
+}
+
+func TestModule_SwitchOctalCaseValue(t *testing.T) {
+	// 0777 (Go octal = 511) must emit the decimal 511 as the Erlang case
+	// pattern, never the literal 0777 (which Erlang would read as 777).
+	src := `package m
+func F(N int) int {
+	switch N {
+	case 0777:
+		return 1
+	default:
+		return 0
+	}
+}`
+	r, err := Module(src)
+	if err != nil {
+		t.Fatalf("Module: %v", err)
+	}
+	if !strings.Contains(r.Erl, "511 -> 1") || strings.Contains(r.Erl, "0777") {
+		t.Errorf("want case 511 (not 0777), got:\n%s", r.Erl)
 	}
 }

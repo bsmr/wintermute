@@ -136,3 +136,27 @@ func TestRung_ControlFlowRecursion(t *testing.T) {
 		t.Fatalf("fact(5) = %q, want 120", got)
 	}
 }
+
+// TestRung_Switch transpiles the 0.3.3 classifier fixture (tagged expression
+// switch), compiles it with erlc, and RUNS it — proving switch-on-value works
+// end to end.
+func TestRung_Switch(t *testing.T) {
+	home, _ := os.UserHomeDir()
+	l := erlang.NewLayout(home, erlang.DefaultVersion)
+	if !l.Installed() {
+		t.Skip("local Erlang not installed; run erlang provisioning first")
+	}
+	dir := t.TempDir()
+	erl := transpileToErl(t, filepath.FromSlash("../../../testdata/switch/classify.go"), dir)
+	if out, err := exec.Command(l.Erlc(), "-o", dir, erl).CombinedOutput(); err != nil {
+		t.Fatalf("erlc %s: %v\n%s", erl, err, out)
+	}
+	out, err := exec.Command(l.Erl(), "-noshell", "-pa", dir,
+		"-eval", "io:format(\"~s\", [classify:name(2)]), init:stop().").CombinedOutput()
+	if err != nil {
+		t.Fatalf("erl run: %v\n%s", err, out)
+	}
+	if got := strings.TrimSpace(string(out)); got != "two" {
+		t.Fatalf("name(2) = %q, want two", got)
+	}
+}
