@@ -2,6 +2,16 @@
 
 Snapshot for resuming work in a fresh session. Updated 2026-07-13.
 
+## ⏭️ RESUME HERE — 0.3.5 is at the brainstorm phase
+
+0.3.4 is **released and closed** (details below); nothing is pending. The next
+work is **0.3.5**, which has **no spec or plan yet** — it is at the brainstorm
+phase. Start a fresh cycle with `superpowers:brainstorming` (see "Next line:
+0.3.5" for the candidate scope), then `writing-plans`, then
+`subagent-driven-development` — the exact flow 0.3.4 used. `main` is clean at
+`ce754b7` (release `7be3b1c` + the docs commit); `git status` clean, all remotes
+in sync. Do NOT treat the 0.3.4 plan (all checkboxes `- [x]`) as unfinished work.
+
 ## Current state: 0.3.4 — type-switch receive — RELEASED
 
 **0.3.4 is fully released.** `main` @ `7be3b1c`, tag `v0.3.4`, on all three

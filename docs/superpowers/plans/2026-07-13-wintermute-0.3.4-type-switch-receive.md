@@ -56,7 +56,7 @@ Pull the tuple-pattern construction out of `receiveHead` into a reusable helper 
 **Interfaces:**
 - Produces: `func (em *emitter) structPattern(typeName string, at ast.Node) (string, error)` — returns the Erlang tuple pattern `{tag, F1, F2, …}` (tag = `strings.ToLower(typeName)`, one part per declared field), registers each field in `em.bound`, and returns an error if `typeName` is not a declared struct or a field collides with an existing binding.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Add to `internal/pkg/transpile/transpile_test.go`:
 
@@ -77,12 +77,12 @@ func F() {
 }
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `go test ./internal/pkg/transpile/ -run TestModule_ReceiveUnknownStructTypeRejected -v`
 Expected: FAIL (today an unknown type yields a fieldless pattern, so no error — the test's `err == nil` branch fires).
 
-- [ ] **Step 3: Extract the helper and call it from `receiveHead`**
+- [x] **Step 3: Extract the helper and call it from `receiveHead`**
 
 Add this helper (place it just above `receiveHead`):
 
@@ -121,17 +121,17 @@ Replace the tail of `receiveHead` (the loop from `parts := []string{strings.ToLo
 	return pat, list[1:], nil
 ```
 
-- [ ] **Step 4: Run the tests to verify they pass**
+- [x] **Step 4: Run the tests to verify they pass**
 
 Run: `go test ./internal/pkg/transpile/ -run 'TestModule_Receive' -v`
 Expected: PASS (the new reject test and all existing receive tests are green — the refactor preserves behavior for declared types).
 
-- [ ] **Step 5: Run the full package to confirm no regression**
+- [x] **Step 5: Run the full package to confirm no regression**
 
 Run: `go test ./internal/pkg/transpile/`
 Expected: `ok`.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add internal/pkg/transpile/transpile.go internal/pkg/transpile/transpile_test.go
@@ -154,7 +154,7 @@ Recognize a tail-position `switch v := otp.Receive().(type)` and emit a multi-cl
 - Produces: a `*ast.TypeSwitchStmt` dispatch in `emitStmts` guarded by `isReceiveTypeSwitch(ts)`.
 - Produces: `func isReceiveTypeSwitch(ts *ast.TypeSwitchStmt) bool`.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```go
 func TestModule_TypeSwitchReceiveWithDefault(t *testing.T) {
@@ -188,12 +188,12 @@ func Handle() {
 
 Note: the fixture's structs use single fields (`Data`, `To`) whose names are the bound variables; `otp.Print(v.Data)` lowers via the existing `SelectorExpr` path to `Print(Data)`. The `case *Pong` clause covers the pointer form (spec: `case *Pong` equals `case Pong`). The `default:` body uses `otp.Print(Data)` — a bare field variable, not the alias — so this task's test stays green independent of Task 4's bare-alias guard.
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `go test ./internal/pkg/transpile/ -run TestModule_TypeSwitchReceiveWithDefault -v`
 Expected: FAIL with "type switch is unsupported (0.3.4+)" (the current `emitStmt` reject).
 
-- [ ] **Step 3: Add recognition + emit**
+- [x] **Step 3: Add recognition + emit**
 
 Add the recognizer (near `isReceiveTypeSwitch`'s siblings, e.g. after `otpPkgIdent`):
 
@@ -329,17 +329,17 @@ Also change the `emitStmt` `*ast.TypeSwitchStmt` reject (line ~628-629) so a non
 		return "", em.errorf(st, "control flow (type switch) is only supported in tail position")
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `go test ./internal/pkg/transpile/ -run TestModule_TypeSwitchReceiveWithDefault -v`
 Expected: PASS.
 
-- [ ] **Step 5: Run the full package**
+- [x] **Step 5: Run the full package**
 
 Run: `go test ./internal/pkg/transpile/`
 Expected: `ok`.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add internal/pkg/transpile/transpile.go internal/pkg/transpile/transpile_test.go
@@ -359,7 +359,7 @@ A type switch with no `default:` must emit a selective receive — the listed cl
 **Interfaces:**
 - Consumes: `emitTypeSwitchReceive` (Task 2).
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```go
 func TestModule_TypeSwitchReceiveSelectiveNoDefault(t *testing.T) {
@@ -388,21 +388,21 @@ func Handle() {
 }
 ```
 
-- [ ] **Step 2: Run test to verify it passes (behavior already correct)**
+- [x] **Step 2: Run test to verify it passes (behavior already correct)**
 
 Run: `go test ./internal/pkg/transpile/ -run TestModule_TypeSwitchReceiveSelectiveNoDefault -v`
 Expected: PASS if Task 2's `haveDefault` guard is correct (no default → no `_ ->` clause). This task is a lock-in test; if it fails, fix `emitTypeSwitchReceive` so the catch-all is appended only when `haveDefault`.
 
-- [ ] **Step 3: (No implementation needed if green.)**
+- [x] **Step 3: (No implementation needed if green.)**
 
 If the test failed, ensure the `if haveDefault { clauses = append(clauses, "_ -> "+deflt) }` guard in `emitTypeSwitchReceive` is present and correct, then re-run.
 
-- [ ] **Step 4: Run the full package**
+- [x] **Step 4: Run the full package**
 
 Run: `go test ./internal/pkg/transpile/`
 Expected: `ok`.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add internal/pkg/transpile/transpile_test.go
@@ -423,7 +423,7 @@ Add the remaining reject rules and the guard that forbids using the alias `v` ba
 - Consumes: `emitTypeSwitchReceive` (Task 2).
 - Produces: `emitter.tsAlias string` — the active type-switch alias name during clause-body emission; empty otherwise.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```go
 func TestModule_TypeSwitchRejects(t *testing.T) {
@@ -495,12 +495,12 @@ func F() {
 
 Note: `otp.Send` takes two args (`otp.Send(Pid, Msg)`); the "bare alias" case passes `v` as the message. If `otp.Send`'s arity differs, use any two-arg `otp` call whose second arg is bare `v`.
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `go test ./internal/pkg/transpile/ -run TestModule_TypeSwitchRejects -v`
 Expected: the `plain value`, `non-struct case`, and `multi-type case` subtests may already pass (Task 2 emits those errors); the `bare alias` subtest FAILS (no guard yet — bare `v` emits as Erlang variable `V`).
 
-- [ ] **Step 3: Add the `tsAlias` field and the alias guard**
+- [x] **Step 3: Add the `tsAlias` field and the alias guard**
 
 Add the field to `emitter` (line ~22):
 
@@ -539,17 +539,17 @@ Add the guard in `emitExpr`'s `*ast.Ident` case (line ~750), before the lowercas
 		return ex.Name, nil
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `go test ./internal/pkg/transpile/ -run TestModule_TypeSwitchRejects -v`
 Expected: all subtests PASS.
 
-- [ ] **Step 5: Run the full package**
+- [x] **Step 5: Run the full package**
 
 Run: `go test ./internal/pkg/transpile/`
 Expected: `ok`.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add internal/pkg/transpile/transpile.go internal/pkg/transpile/transpile_test.go
@@ -569,7 +569,7 @@ A type-switch receive terminates once every clause terminates; a `default` is **
 **Interfaces:**
 - Consumes: `emitTypeSwitchReceive` (Task 2).
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```go
 func TestModule_BareIfTypeSwitchReceiveThenAccepted(t *testing.T) {
@@ -598,12 +598,12 @@ func F(N int) string {
 }
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `go test ./internal/pkg/transpile/ -run TestModule_BareIfTypeSwitchReceiveThenAccepted -v`
 Expected: FAIL with "the then-branch of a bare if must end in a return" (`terminates()` does not yet know `*ast.TypeSwitchStmt`).
 
-- [ ] **Step 3: Add the case to `terminates()`**
+- [x] **Step 3: Add the case to `terminates()`**
 
 In `terminates()` (line ~427), add a case after the `*ast.SwitchStmt` case:
 
@@ -621,17 +621,17 @@ In `terminates()` (line ~427), add a case after the `*ast.SwitchStmt` case:
 		return true
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `go test ./internal/pkg/transpile/ -run TestModule_BareIfTypeSwitchReceiveThenAccepted -v`
 Expected: PASS.
 
-- [ ] **Step 5: Run the full package**
+- [x] **Step 5: Run the full package**
 
 Run: `go test ./internal/pkg/transpile/`
 Expected: `ok`.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add internal/pkg/transpile/transpile.go internal/pkg/transpile/transpile_test.go
@@ -651,7 +651,7 @@ Prove the multi-clause receive dispatch works end-to-end: a fixture transpiles, 
 **Interfaces:**
 - Consumes: `transpileToErl`, `erlc` helpers already in `ladder_integration_test.go` (see `TestRung_Switch`, ~line 143).
 
-- [ ] **Step 1: Write the fixture**
+- [x] **Step 1: Write the fixture**
 
 Create `testdata/typeswitch/dispatch.go`:
 
@@ -682,7 +682,7 @@ func Handle() string {
 
 Note: both structs carry a `Data` field so each clause returns its payload. Expected Erlang: `handle() -> receive {ping, Data} -> Data; {pong, Data} -> Data; _ -> <<"other">> end.`
 
-- [ ] **Step 2: Write the failing integration test**
+- [x] **Step 2: Write the failing integration test**
 
 Add to `internal/pkg/ladder/ladder_integration_test.go`:
 
@@ -715,12 +715,12 @@ func TestRung_TypeSwitchReceive(t *testing.T) {
 
 Note: match the exact helper names/signatures used by `TestRung_Switch` in this file — `requireErlang`, `transpileToErl`, `erlcPath`, `erlPath` may be named differently (e.g. an inline `erlcPath(t)`/`erlPath(t)` or a package-level const). Read `TestRung_Switch` (~line 143) and mirror its helpers exactly. The `-eval` seeds the mailbox with `self() ! Msg` so the selective receive matches immediately.
 
-- [ ] **Step 3: Run the test to verify it fails first for the right reason**
+- [x] **Step 3: Run the test to verify it fails first for the right reason**
 
 Run: `go test -tags integration -count=1 ./internal/pkg/ladder/ -run TestRung_TypeSwitchReceive -v`
 Expected: FAIL — initially because the fixture path or helper names need aligning, or (if Tasks 2/4 are incomplete) a transpile error. Once wired, it must reach the run step.
 
-- [ ] **Step 4: Align helpers and re-run to green**
+- [x] **Step 4: Align helpers and re-run to green**
 
 Fix the helper names to match the file, then run:
 
@@ -729,7 +729,7 @@ Expected: PASS — both `{ping, …}` → `P` and `{pong, …}` → `Q`.
 
 Clear leftover BEAM nodes first if the suite flakes: `pkill -9 -x beam.smp; pkill -9 -x epmd`.
 
-- [ ] **Step 5: Run both integration suites and the unit suite**
+- [x] **Step 5: Run both integration suites and the unit suite**
 
 Run:
 ```bash
@@ -738,7 +738,7 @@ go test -tags integration -count=1 ./internal/pkg/ladder/ ./internal/pkg/cli/
 ```
 Expected: all green. `-count=1` because `transpile.go` changed — don't trust the cache.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add testdata/typeswitch/dispatch.go internal/pkg/ladder/ladder_integration_test.go
