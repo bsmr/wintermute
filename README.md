@@ -94,7 +94,8 @@ notes: **[github.com/bsmr/wintermute/releases](https://github.com/bsmr/wintermut
 | **0.1.x** | `0.1.0` Go→Erlang echo interop ladder |
 | **0.2.x** — deployment | `0.2.0` hardening · `0.2.1` distributed interop · `0.2.2` gen_server model · `0.2.3` OTP application · `0.2.4` persistent node · `0.2.5` full OTP release · `0.2.6` self-contained target system · `0.2.7` native Erlang interop |
 | **0.3.0** — promotion | consolidation of the 0.2.x line: control-node hardening + security-review sweep |
-| **0.3.x** — next | transpiler language: function parameters, `case`/guards/operators, tail-recursion, full gen_server callbacks, `gen_statem`/`gen_event` |
+| **0.3.x** — transpiler language | `0.3.1` value model (function parameters, `return`, local `:=`, calls-with-args, recursion) · `0.3.2` control flow (full operator set, `if`/`else` → `case`) |
+| **next** | `switch` → `case`, guards, full gen_server callbacks, `gen_statem`/`gen_event` |
 
 ### What Wintermute transpiles today
 
@@ -104,8 +105,10 @@ The transpiler covers a deliberately small, cleanly-mapping subset of Go:
   (`one_for_one`), `application` (skeleton).
 - **Primitives** (via the `otp` marker package): spawn, send/receive, local &
   global register, `gen_server:start_link`/`call`, `io:format`.
-- **Language:** structs → tagged tuples, string/int literals, `+`, nullary
-  functions, single-clause `receive`.
+- **Language:** structs → tagged tuples, string/int literals, function
+  parameters and `return` values, local `:=` bindings, the full
+  arithmetic/comparison/boolean operator set, `if`/`else` → `case`,
+  self-recursion, single-clause `receive`.
 
 Anything outside the subset — records, complex guards, binary matching, list
 comprehensions, macros — is written as a hand-written `.erl` module (the native
@@ -124,15 +127,16 @@ fast with the missing ones named.
 
 ## Status
 
-> ⚠️ **Early Development / Experimental** — current release: **0.3.0**
+> ⚠️ **Early Development / Experimental** — current release: **0.3.2**
 
 Early and experimental, but functional. The deployment line (0.2.x) is
 feature-complete for the echo interop subset: Go transpiles to real Erlang/OTP
 (application → supervisor → gen_server), builds formal and self-contained OTP
 releases, runs as a persistent distributed node, and interoperates with
-hand-written native Erlang — all on OTP 29. The Go surface is still a narrow
-subset (widening in the 0.3.x line). Contributions, ideas, and discussions are
-welcome.
+hand-written native Erlang — all on OTP 29. The 0.3.x line is actively widening
+the transpiler itself: function parameters, `return` values, local bindings, the
+full operator set, and `if`/`else` → `case` control flow (making recursion
+useful) have shipped. Contributions, ideas, and discussions are welcome.
 
 ---
 
