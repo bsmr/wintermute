@@ -9,6 +9,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"maps"
 	"sort"
 	"strings"
 )
@@ -313,12 +314,23 @@ func (em *emitter) isReceiveAssign(as *ast.AssignStmt) bool {
 func (em *emitter) emitStmts(list []ast.Stmt, isTail bool) (string, error) {
 	var parts []string
 	for i, s := range list {
+		if is, ok := s.(*ast.IfStmt); ok {
+			if !isTail {
+				return "", em.errorf(is, "control flow (if) is only supported in tail position")
+			}
+			e, err := em.emitIf(is, list[i+1:])
+			if err != nil {
+				return "", err
+			}
+			parts = append(parts, e)
+			return strings.Join(parts, ",\n"), nil // an if consumes the rest of the sequence
+		}
 		if ret, ok := s.(*ast.ReturnStmt); ok {
 			if !isTail || i != len(list)-1 {
-				return "", em.errorf(ret, "early return is unsupported; needs case/if (0.3.2)")
+				return "", em.errorf(ret, "early return is unsupported; put it in an if branch (0.3.2)")
 			}
 			if len(ret.Results) != 1 {
-				return "", em.errorf(ret, "return must yield exactly one value (multi-value return is 0.3.2+)")
+				return "", em.errorf(ret, "return must yield exactly one value (multi-value return is 0.3.3+)")
 			}
 			e, err := em.emitExpr(ret.Results[0])
 			if err != nil {
@@ -334,6 +346,89 @@ func (em *emitter) emitStmts(list []ast.Stmt, isTail bool) (string, error) {
 		parts = append(parts, e)
 	}
 	return strings.Join(parts, ",\n"), nil
+}
+
+// emitIf emits an if statement as an Erlang `case Cond of true -> …; false -> …
+// end`. The false branch is the explicit else block, or — for a bare if — the
+// continuation `cont` (statements following the if). Only if/else and bare-if
+// are supported; else-if chains, an init clause, and a bare if with no
+// continuation are rejected (0.3.3+).
+func (em *emitter) emitIf(is *ast.IfStmt, cont []ast.Stmt) (string, error) {
+	if is.Init != nil {
+		return "", em.errorf(is, "if with an init statement is unsupported (0.3.3+)")
+	}
+	if _, ok := is.Else.(*ast.IfStmt); ok {
+		return "", em.errorf(is, "else-if chains are unsupported (0.3.3+); use a nested if")
+	}
+	if len(is.Body.List) == 0 {
+		return "", em.errorf(is, "if branch has no value (empty block)")
+	}
+	cond, err := em.emitExpr(is.Cond)
+	if err != nil {
+		return "", err
+	}
+	then, err := em.emitBranch(is.Body.List)
+	if err != nil {
+		return "", err
+	}
+	var els string
+	switch e := is.Else.(type) {
+	case *ast.BlockStmt:
+		if len(cont) != 0 {
+			return "", em.errorf(cont[0], "unreachable statement after a terminating if/else")
+		}
+		if len(e.List) == 0 {
+			return "", em.errorf(e, "else branch has no value (empty block)")
+		}
+		els, err = em.emitBranch(e.List)
+	case nil:
+		if len(cont) == 0 {
+			return "", em.errorf(is, "a bare if needs a following value (the case's false branch)")
+		}
+		if !terminates(is.Body.List) {
+			return "", em.errorf(is, "the then-branch of a bare if must end in a return; otherwise it would fall through to the continuation, which a terminal Erlang case clause cannot express")
+		}
+		els, err = em.emitBranch(cont)
+	default:
+		return "", em.errorf(is, "unsupported else form")
+	}
+	if err != nil {
+		return "", err
+	}
+	return "case " + cond + " of\n" +
+		indent("true -> "+then) + ";\n" +
+		indent("false -> "+els) + "\nend", nil
+}
+
+// terminates reports whether a statement list ends in a construct that yields
+// the function's value and does not fall through: a return, or an if/else whose
+// both branches terminate. A bare if (no else) falls through, so it does not
+// terminate. Used to reject a bare-if then-branch that would fall through to the
+// continuation (Go semantics) but be emitted as a terminal case clause (Erlang).
+func terminates(list []ast.Stmt) bool {
+	if len(list) == 0 {
+		return false
+	}
+	switch s := list[len(list)-1].(type) {
+	case *ast.ReturnStmt:
+		return true
+	case *ast.IfStmt:
+		els, ok := s.Else.(*ast.BlockStmt)
+		return ok && terminates(s.Body.List) && terminates(els.List)
+	default:
+		return false
+	}
+}
+
+// emitBranch emits a case-clause body (an if/else block or a bare-if
+// continuation) as a value-yielding Erlang sequence in its own binding scope:
+// bound is snapshotted and restored, so a name bound here does not leak to a
+// sibling branch (Erlang case clauses are independent scopes), while outer
+// bindings stay visible and their collisions stay rejected.
+func (em *emitter) emitBranch(list []ast.Stmt) (string, error) {
+	snap := maps.Clone(em.bound)
+	defer func() { em.bound = snap }()
+	return em.emitStmts(list, true)
 }
 
 // receiveHead recognizes a leading `x := otp.Receive().(T)` statement, returns
@@ -418,6 +513,42 @@ func (em *emitter) emitStmt(s ast.Stmt) (string, error) {
 	}
 }
 
+// binOp maps Go binary operators to their Erlang spelling. Equality is exact
+// (=:= / =/=), matching Go's non-coercing == on ints and atoms.
+var binOp = map[token.Token]string{
+	token.ADD: "+", token.SUB: "-", token.MUL: "*",
+	token.QUO: "div", token.REM: "rem",
+	token.EQL: "=:=", token.NEQ: "=/=",
+	token.LSS: "<", token.GTR: ">", token.LEQ: "=<", token.GEQ: ">=",
+	token.LAND: "andalso", token.LOR: "orelse",
+}
+
+// unparen strips parenthesis layers from e.
+func unparen(e ast.Expr) ast.Expr {
+	for {
+		p, ok := e.(*ast.ParenExpr)
+		if !ok {
+			return e
+		}
+		e = p.X
+	}
+}
+
+// emitOperand emits e as an operand of a binary/unary operator, wrapping it in
+// parentheses when (ignoring existing parens) it is itself a binary expression,
+// so Go's grouping survives regardless of Erlang's operator precedence. A single
+// operator stays bare (X + Y, not (X + Y)).
+func (em *emitter) emitOperand(e ast.Expr) (string, error) {
+	s, err := em.emitExpr(e)
+	if err != nil {
+		return "", err
+	}
+	if _, ok := unparen(e).(*ast.BinaryExpr); ok {
+		return "(" + s + ")", nil
+	}
+	return s, nil
+}
+
 func (em *emitter) emitExpr(e ast.Expr) (string, error) {
 	switch ex := e.(type) {
 	case *ast.BasicLit:
@@ -429,18 +560,30 @@ func (em *emitter) emitExpr(e ast.Expr) (string, error) {
 		}
 		return "", em.errorf(ex, "unsupported literal: %s", ex.Value)
 	case *ast.BinaryExpr:
-		if ex.Op != token.ADD {
-			return "", em.errorf(ex, "unsupported binary operator %s (only + in the gen_server subset)", ex.Op)
+		op, ok := binOp[ex.Op]
+		if !ok {
+			return "", em.errorf(ex, "unsupported binary operator %s (0.3.3+)", ex.Op)
 		}
-		l, err := em.emitExpr(ex.X)
+		l, err := em.emitOperand(ex.X)
 		if err != nil {
 			return "", err
 		}
-		r, err := em.emitExpr(ex.Y)
+		r, err := em.emitOperand(ex.Y)
 		if err != nil {
 			return "", err
 		}
-		return l + " + " + r, nil
+		return l + " " + op + " " + r, nil
+	case *ast.UnaryExpr:
+		if ex.Op != token.NOT {
+			return "", em.errorf(ex, "unsupported unary operator %s", ex.Op)
+		}
+		x, err := em.emitOperand(ex.X)
+		if err != nil {
+			return "", err
+		}
+		return "not " + x, nil
+	case *ast.ParenExpr:
+		return em.emitExpr(ex.X)
 	case *ast.CallExpr:
 		return em.emitCall(ex)
 	case *ast.CompositeLit:

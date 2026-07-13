@@ -112,3 +112,27 @@ func TestRung_ValueModel(t *testing.T) {
 		t.Fatalf("no math.beam produced: %v", err)
 	}
 }
+
+// TestRung_ControlFlowRecursion transpiles the 0.3.2 factorial fixture
+// (operators + bare-if base case), compiles it with erlc, and RUNS it — a
+// runtime check that the recursion terminates, not just that it compiles.
+func TestRung_ControlFlowRecursion(t *testing.T) {
+	home, _ := os.UserHomeDir()
+	l := erlang.NewLayout(home, erlang.DefaultVersion)
+	if !l.Installed() {
+		t.Skip("local Erlang not installed; run erlang provisioning first")
+	}
+	dir := t.TempDir()
+	erl := transpileToErl(t, filepath.FromSlash("../../../testdata/controlflow/fact.go"), dir)
+	if out, err := exec.Command(l.Erlc(), "-o", dir, erl).CombinedOutput(); err != nil {
+		t.Fatalf("erlc %s: %v\n%s", erl, err, out)
+	}
+	out, err := exec.Command(l.Erl(), "-noshell", "-pa", dir,
+		"-eval", "io:format(\"~p\", [fact:fact(5)]), init:stop().").CombinedOutput()
+	if err != nil {
+		t.Fatalf("erl run: %v\n%s", err, out)
+	}
+	if got := strings.TrimSpace(string(out)); got != "120" {
+		t.Fatalf("fact(5) = %q, want 120", got)
+	}
+}

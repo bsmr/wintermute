@@ -219,7 +219,7 @@ func Boot() { otp.Print(x) }
 
 func TestFile_ErrorsCarryPosition(t *testing.T) {
 	src := `package m
-func Boot() { 1 - 2 }
+func Boot() { 1 << 2 }
 `
 	_, _, err := File(src)
 	if err == nil {
@@ -321,9 +321,12 @@ func TestEmitExpr_IntAndAdd(t *testing.T) {
 	}
 }
 
-func TestEmitExpr_NonAddBinaryErrors(t *testing.T) {
+// TestEmitExpr_UnsupportedBinaryErrors covers an operator still outside the
+// binOp table (e.g. bit-shift), not merely a non-"+" one: 0.3.2 added the full
+// arithmetic/comparison/boolean set (see TestModule_Operators).
+func TestEmitExpr_UnsupportedBinaryErrors(t *testing.T) {
 	em := &emitter{structs: map[string][]string{}}
-	expr := &ast.BinaryExpr{X: &ast.Ident{Name: "A"}, Op: token.SUB, Y: &ast.Ident{Name: "B"}}
+	expr := &ast.BinaryExpr{X: &ast.Ident{Name: "A"}, Op: token.SHL, Y: &ast.Ident{Name: "B"}}
 	if _, err := em.emitExpr(expr); err == nil {
 		t.Fatal("want error for unsupported binary operator, got nil")
 	}
@@ -669,8 +672,8 @@ import "go.muehmer.eu/wintermute/pkg/otp"
 func F(X int) int { return X
 	otp.Print("unreached") }`
 	_, err := Module(src)
-	if err == nil || !strings.Contains(err.Error(), "case") {
-		t.Fatalf("want early-return error pointing at case/0.3.2, got %v", err)
+	if err == nil || !strings.Contains(err.Error(), "if branch") {
+		t.Fatalf("want early-return error pointing at if branch, got %v", err)
 	}
 }
 
@@ -744,6 +747,50 @@ func Handle(Y int) int {
 	_, err := Module(src)
 	if err == nil || !strings.Contains(err.Error(), "already bound") {
 		t.Fatalf("want rebinding rejection, got %v", err)
+	}
+}
+
+// The 0.3.1-analog seam: a `:=` inside an if branch, within a receive handler,
+// colliding with a receive-pattern field. The branch's bound snapshot must
+// include the receive fields, so this is rejected — not silently emitted as an
+// Erlang equality match. (Guards against the exact class the Copilot gate caught.)
+func TestModule_BindingInBranchCollidesWithReceiveField(t *testing.T) {
+	src := `package demo
+import "go.muehmer.eu/wintermute/pkg/otp"
+type Msg struct { X int }
+func Handle() int {
+	M := otp.Receive().(Msg)
+	if M.X == 0 {
+		X := 5
+		return X
+	}
+	return M.X
+}`
+	_, err := Module(src)
+	if err == nil || !strings.Contains(err.Error(), "already bound") {
+		t.Fatalf("want already-bound rejection, got %v", err)
+	}
+}
+
+// Positive counterpart: an if in tail position inside a receive clause body is
+// accepted and emits a case over the received field.
+func TestModule_IfInReceiveClauseBody(t *testing.T) {
+	src := `package demo
+import "go.muehmer.eu/wintermute/pkg/otp"
+type Msg struct { X int }
+func Handle() int {
+	M := otp.Receive().(Msg)
+	if M.X == 0 {
+		return 1
+	}
+	return M.X
+}`
+	r, err := Module(src)
+	if err != nil {
+		t.Fatalf("Module: %v", err)
+	}
+	if !strings.Contains(r.Erl, "case X =:= 0 of") {
+		t.Errorf("want case over the received field, got:\n%s", r.Erl)
 	}
 }
 
@@ -826,6 +873,67 @@ func Add(X, Y int) int { return X + Y }`
 	}
 }
 
+func TestModule_Operators(t *testing.T) {
+	cases := []struct{ goExpr, erl string }{
+		{"A - B", "a(A, B) -> A - B."},
+		{"A * B", "a(A, B) -> A * B."},
+		{"A / B", "a(A, B) -> A div B."},
+		{"A % B", "a(A, B) -> A rem B."},
+		{"A == B", "a(A, B) -> A =:= B."},
+		{"A != B", "a(A, B) -> A =/= B."},
+		{"A < B", "a(A, B) -> A < B."},
+		{"A <= B", "a(A, B) -> A =< B."},
+		{"A > B", "a(A, B) -> A > B."},
+		{"A >= B", "a(A, B) -> A >= B."},
+		{"A && B", "a(A, B) -> A andalso B."},
+		{"A || B", "a(A, B) -> A orelse B."},
+	}
+	for _, c := range cases {
+		src := "package m\nfunc A(A, B int) int { return " + c.goExpr + " }"
+		r, err := Module(src)
+		if err != nil {
+			t.Fatalf("%s: Module: %v", c.goExpr, err)
+		}
+		if !strings.Contains(r.Erl, c.erl) {
+			t.Errorf("%s: want %q, got:\n%s", c.goExpr, c.erl, r.Erl)
+		}
+	}
+}
+
+func TestModule_UnaryNot(t *testing.T) {
+	src := `package m
+func F(A bool) bool { return !A }`
+	r, err := Module(src)
+	if err != nil {
+		t.Fatalf("Module: %v", err)
+	}
+	if !strings.Contains(r.Erl, "f(A) -> not A.") {
+		t.Errorf("want not A, got:\n%s", r.Erl)
+	}
+}
+
+func TestModule_PrecedenceParens(t *testing.T) {
+	// A binary operand keeps its grouping; a single operator stays bare.
+	src := `package m
+func F(A, B, C int) int { return (A + B) * C }`
+	r, err := Module(src)
+	if err != nil {
+		t.Fatalf("Module: %v", err)
+	}
+	if !strings.Contains(r.Erl, "f(A, B, C) -> (A + B) * C.") {
+		t.Errorf("want (A + B) * C, got:\n%s", r.Erl)
+	}
+}
+
+func TestModule_UnsupportedOperatorRejected(t *testing.T) {
+	src := `package m
+func F(A, B int) int { return A << B }`
+	_, err := Module(src)
+	if err == nil || !strings.Contains(err.Error(), "operator") {
+		t.Fatalf("want unsupported-operator error, got %v", err)
+	}
+}
+
 func TestModule_SelfRecursionEmits(t *testing.T) {
 	// Recursion mechanism only; a real base case needs case/if (0.3.2).
 	src := `package loop
@@ -836,5 +944,191 @@ func Spin(X int) int { return Spin(X) }`
 	}
 	if !strings.Contains(r.Erl, "spin(X) -> spin(X).") {
 		t.Errorf("want spin(X) -> spin(X), got:\n%s", r.Erl)
+	}
+}
+
+func TestModule_IfElse(t *testing.T) {
+	src := `package m
+func Sign(N int) int {
+	if N == 0 {
+		return 0
+	} else {
+		return 1
+	}
+}`
+	r, err := Module(src)
+	if err != nil {
+		t.Fatalf("Module: %v", err)
+	}
+	for _, want := range []string{"case N =:= 0 of", "true -> 0", "false -> 1", "end"} {
+		if !strings.Contains(r.Erl, want) {
+			t.Errorf("want %q, got:\n%s", want, r.Erl)
+		}
+	}
+}
+
+func TestModule_BareIfBaseCase(t *testing.T) {
+	src := `package m
+func Fact(N int) int {
+	if N == 0 {
+		return 1
+	}
+	return N * Fact(N-1)
+}`
+	r, err := Module(src)
+	if err != nil {
+		t.Fatalf("Module: %v", err)
+	}
+	for _, want := range []string{"case N =:= 0 of", "true -> 1", "false -> N * fact(N - 1)"} {
+		if !strings.Contains(r.Erl, want) {
+			t.Errorf("want %q, got:\n%s", want, r.Erl)
+		}
+	}
+}
+
+func TestModule_BranchSiblingReuse(t *testing.T) {
+	// Z bound fresh in both branches — legal (independent Erlang case-clause scopes).
+	src := `package m
+func F(N int) int {
+	if N == 0 {
+		Z := 1
+		return Z
+	}
+	Z := 2
+	return Z
+}`
+	r, err := Module(src)
+	if err != nil {
+		t.Fatalf("want sibling reuse accepted, got %v", err)
+	}
+	if !strings.Contains(r.Erl, "true -> Z = 1") || !strings.Contains(r.Erl, "false -> Z = 2") {
+		t.Errorf("got:\n%s", r.Erl)
+	}
+}
+
+func TestModule_BranchOuterCollisionRejected(t *testing.T) {
+	// Z collides with the parameter Z — rejected (outer binding visible in the branch).
+	src := `package m
+func F(Z int) int {
+	if Z == 0 {
+		Z := 1
+		return Z
+	}
+	return Z
+}`
+	_, err := Module(src)
+	if err == nil || !strings.Contains(err.Error(), "already bound") {
+		t.Fatalf("want outer-collision rejection, got %v", err)
+	}
+}
+
+func TestModule_ElseIfRejected(t *testing.T) {
+	src := `package m
+func F(N int) int {
+	if N == 0 {
+		return 0
+	} else if N == 1 {
+		return 1
+	}
+	return 2
+}`
+	_, err := Module(src)
+	if err == nil || !strings.Contains(err.Error(), "else-if") {
+		t.Fatalf("want else-if rejection, got %v", err)
+	}
+}
+
+func TestModule_BareIfNoContinuationRejected(t *testing.T) {
+	src := `package m
+func F(N int) int {
+	if N == 0 {
+		return 0
+	}
+}`
+	_, err := Module(src)
+	if err == nil || !strings.Contains(err.Error(), "false branch") {
+		t.Fatalf("want bare-if-no-continuation rejection, got %v", err)
+	}
+}
+
+func TestModule_BareIfNonTerminatingThenRejected(t *testing.T) {
+	// A bare-if then-branch that does not return would, in Go, fall through to
+	// the continuation; an Erlang terminal case clause cannot express that, so
+	// it must be rejected rather than silently returning the branch's value.
+	src := `package m
+import "go.muehmer.eu/wintermute/pkg/otp"
+func F(N int) int {
+	if N == 0 {
+		otp.Print("zero")
+	}
+	return N
+}`
+	_, err := Module(src)
+	if err == nil || !strings.Contains(err.Error(), "fall through") {
+		t.Fatalf("want non-terminating-then rejection, got %v", err)
+	}
+}
+
+func TestModule_UnreachableAfterIfElseRejected(t *testing.T) {
+	src := `package m
+func F(N int) int {
+	if N == 0 {
+		return 0
+	} else {
+		return 1
+	}
+	return 2
+}`
+	_, err := Module(src)
+	if err == nil || !strings.Contains(err.Error(), "unreachable") {
+		t.Fatalf("want unreachable rejection, got %v", err)
+	}
+}
+
+func TestModule_EmptyThenBranchRejected(t *testing.T) {
+	src := `package m
+import "go.muehmer.eu/wintermute/pkg/otp"
+func F(N int) {
+	if N == 0 {
+	} else {
+		otp.Print("x")
+	}
+}`
+	_, err := Module(src)
+	if err == nil || !strings.Contains(err.Error(), "empty block") {
+		t.Fatalf("want empty-then rejection, got %v", err)
+	}
+}
+
+func TestModule_EmptyElseBranchRejected(t *testing.T) {
+	src := `package m
+import "go.muehmer.eu/wintermute/pkg/otp"
+func F(N int) {
+	if N == 0 {
+		otp.Print("x")
+	} else {
+	}
+}`
+	_, err := Module(src)
+	if err == nil || !strings.Contains(err.Error(), "empty block") {
+		t.Fatalf("want empty-else rejection, got %v", err)
+	}
+}
+
+func TestModule_IfNonTailRejected(t *testing.T) {
+	// An if in the pre-receive slice is not in tail position (isTail=false).
+	src := `package m
+import "go.muehmer.eu/wintermute/pkg/otp"
+type Msg struct { X int }
+func Handle(N int) int {
+	if N == 0 {
+		return 0
+	}
+	M := otp.Receive().(Msg)
+	return M.X
+}`
+	_, err := Module(src)
+	if err == nil || !strings.Contains(err.Error(), "tail position") {
+		t.Fatalf("want non-tail-if rejection, got %v", err)
 	}
 }
