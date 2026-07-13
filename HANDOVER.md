@@ -2,66 +2,72 @@
 
 Snapshot for resuming work in a fresh session. Updated 2026-07-13.
 
-## Current state: 0.3.3 — switch — RELEASED
+## Current state: 0.3.4 — type-switch receive — RELEASED
 
-**0.3.3 is fully released.** `main` @ `5e569f1`, tag `v0.3.3`, on all three
+**0.3.4 is fully released.** `main` @ `7be3b1c`, tag `v0.3.4`, on all three
 remotes (`origin`, `upstream`, `github`), GitHub release published as Latest,
-`production-0.3.3` on `origin`. The last feature step of the 0.3.x transpiler
-line to date. Nothing is pending merge.
+`production-0.3.4` on `origin`. The fourth feature step of the 0.3.x transpiler
+line. Nothing is pending merge.
 
-### 0.3.3 delivered
+### 0.3.4 delivered
 
-- **Tagged expression `switch` → Erlang `case`-on-value** (`emitSwitch`, mirrors
-  `emitIf`): single literal case values, a required `default` (emitted as the
-  catch-all `_`, sorted LAST regardless of Go source position), each clause body
-  in its own `bound` scope via `emitBranch`, empty clauses rejected, the switch
-  terminal + tail-position only. A type switch (`*ast.TypeSwitchStmt`) is rejected.
-  Deferred forms (no-default, multi-value, tagless, type switch, `fallthrough`,
-  init) all error → 0.3.4+.
-- **Integer-literal normalization**: `emitExpr` normalizes every Go int literal
-  to decimal Erlang via `strconv.ParseInt(v, 0, 64)` + `FormatInt(n, 10)`.
-  Previously `0777` emitted `0777` (Erlang reads 777 — clean compile, WRONG
-  value) and `0x1F` emitted invalid Erlang — a pre-existing verbatim-`BasicLit`
-  root cause. Overflow → positioned error, not silent wrap.
-- **Exhaustive switch counts as terminating** (folded from the Copilot release
-  gate): `terminates()` now accepts a `switch` with a `default` whose every
-  clause terminates, so an exhaustive switch may serve as the then-branch of a
-  bare `if`, exactly like an if/else. Previously such valid Go was wrongly
-  rejected with the "fall through" error (loud, not a mis-transpile).
-- **Runnable rung** — `testdata/switch/classify.go` transpiles, compiles with
-  `erlc`, and RUNS to `classify:name(2) = "two"`.
+- **`switch v := otp.Receive().(type)` → multi-clause Erlang `receive`**
+  (`emitTypeSwitchReceive`, gated by `isReceiveTypeSwitch`): the idiomatic
+  Erlang process dispatch — a process waits for a message and branches on its
+  type. Generalizes the 0.3.1 single-clause receive to N message types.
+- **Struct-typed cases only** → tagged tuple `{tag, Field…}`, reusing the
+  extracted `structPattern` helper (shared with the single-clause receive). Each
+  clause binds its struct's fields in a per-clause `em.bound` scope (snapshot via
+  `maps.Clone`, restore after); `v.Field` → `Field`; a bare alias `v` is rejected
+  (`em.tsAlias` guard in `emitExpr`). `case *Ping` == `case Ping` (no pointers).
+- **`default:` optional**: with → trailing catch-all `_ ->`; without → selective
+  receive (non-matching messages stay in the mailbox, the process blocks).
+  `terminates()` counts a type-switch receive as terminating with NO default
+  (a receive cannot fall through), so it may be a bare-`if` then-branch.
+- **Runnable rung** — `testdata/typeswitch/dispatch.go` transpiles, compiles with
+  `erlc`, and RUNS: `{ping, …}`→ping clause, `{pong, …}`→pong clause.
+- **Two Copilot-gate silent-mis-transpiles folded before release** (the gate
+  finds a real one every release): (a) `case Ping` + `case *Ping` (distinct Go
+  types, same Erlang tag `ping`) made the second clause unreachable — now any two
+  cases sharing a lowercased tag are rejected (covers star-vs-non-star and
+  case-only-differing names, i.e. the old opus M-B); (b) a type switch with an
+  init statement (`switch n := f(); v := x.(type)`) had its init silently dropped
+  — now rejected like `emitIf`/`emitSwitch`.
 
-Verification (2026-07-13, on `5e569f1`): `go test ./...` green; ladder + cli
-integration `-count=1` green (37.3s / 25.3s); Copilot release gate re-run on the
-re-squashed diff `25dd628..5e569f1` — **no correctness findings** (fail-safe
-confirmed by construction: missing-default / fallthrough / non-terminating-clause
-all correctly rejected). The gate's first pass on `25dd628..f0acb53` had found the
-`terminates()`/switch gap, which was folded via TDD + re-squash before the push.
+Deferred to 0.3.5+ (all error): plain-value operand (→ `case`), non-struct cases
+(→ guards), multi-type cases, whole aliased `v`, `after`/`fallthrough`/tagless.
 
-## Next line: 0.3.4
+Verification (2026-07-13, on `7be3b1c`): `go test ./...` green; ladder + cli
+integration `-count=1` green (34.1s / 21.4s, isolated after a leftover-BEAM flake);
+Copilot gate re-run on the re-squashed diff `9cf0dd2..7be3b1c` — **fixes correct
+and complete, no other silent mis-transpile**. Built subagent-driven/TDD: six
+tasks (implementer + spec-and-quality review each) + whole-branch opus review
+(ready to merge) + two post-review cleanups (M1 dead `emitStmt` case removed, M2
+struct-type check folded into `caseTypeName`).
+
+## Next line: 0.3.5
 
 Suggested (each starts with `superpowers:brainstorming`):
 
-- **0.3.4 — widen `switch` and/or begin behaviours.** Candidates: `switch`
-  without `default` (no-match → the continuation, the bare-`if` continuation
-  model); multi-value cases (`case 1, 2:` → an Erlang guard); tagless `switch`
-  (→ an if/`case true` chain); **type switch** (`switch v := x.(type)` → type
-  guards `is_integer`/…) — note this DOES bind a name (`v`), a full
-  `bound-set-integration` context. Or move to full gen_server callbacks
+- **0.3.5 — widen the type switch, or begin behaviours.** Candidates: type
+  switch over a **plain value** (`switch v := X.(type)` → an Erlang `case` on the
+  value, the other lowering); **non-struct cases** (`case int`/`string` → type
+  guards `is_integer`/`is_binary`); **multi-type cases** (`case Ping, Pong:`);
+  passing the **whole** aliased value. Or move to full gen_server callbacks
   (`handle_cast`/`handle_info`/`terminate`/`code_change`) / `gen_statem`.
 
 Framing (unchanged): the transpiler covers only what maps cleanly to Erlang;
 loops, list comprehensions, mutable state stay in the native-`.erl` escape hatch
 (0.2.7), NOT the transpiler.
 
-### Open idea: RosettaCode as a differential test corpus
+### Open idea (from 0.3.4 session): RosettaCode as a differential test corpus
 
-User proposed pulling Go+Erlang solution pairs from https://rosettacode.org/ to
-grow the comparison/test set. Not yet actioned — assess in a 0.3.4 brainstorm:
-licensing (RosettaCode is GFDL — attribution/scope for vendored fixtures), and
-that most tasks exceed the transpiler subset (loops, comprehensions), so only a
-curated slice fits. Value: real-world Go→Erlang pairs to pick the next subset
-targets from.
+User proposed pulling Go+Erlang solution pairs from https://rosettacode.org/.
+Assessed and DEFERRED — see the `rosettacode-access-and-fit` memory: WebFetch UA
+is blocked (use the MediaWiki API), and the pairs are poor differential oracles
+(the two languages solve each task idiomatically differently, most tasks exceed
+the transpiler subset, GFDL license). Useful only as Go-side input fixtures and a
+backlog source for which features to widen next.
 
 ## Build & test
 
@@ -74,23 +80,24 @@ go test -tags integration -count=1 ./internal/pkg/cli/
 ```
 
 **Integration-test gotcha:** the CLI/ladder integration tests boot detached BEAM
-nodes. A leftover `epmd`/`beam.smp` from a prior run causes odd flaky failures.
-Clear first: `pkill -9 -x beam.smp; pkill -9 -x epmd`, then re-run. See the
-`integration-test-leftover-nodes` memory.
+nodes. A leftover `epmd`/`beam.smp` from a prior run causes odd flaky failures
+(0.3.4's cli suite flaked once this way with a spurious `-behaviour(gen_server)`
+erlc error). Clear first: `pkill -9 -x beam.smp; pkill -9 -x epmd`, then re-run.
+See the `integration-test-leftover-nodes` memory.
 
-## Release ritual (reference — for 0.3.4)
+## Release ritual (reference — for 0.3.5)
 
-The gated-release flow, unchanged from 0.3.1/0.3.2/0.3.3:
+Unchanged from 0.3.1–0.3.4:
 
 1. VERSION bump on `development-X.Y.Z-work`, commit.
 2. Resync `-main` to `main` (`git branch -f`), squash-merge `-work`, `commit -s`
-   with `feat: Wintermute X.Y.Z — <subtitle>` (write notes to a scratch file,
-   reused for the GitHub release). FF `main`, `git tag -a vX.Y.Z`.
+   with `feat: Wintermute X.Y.Z — <subtitle>` (notes to a scratch file, reused
+   for the GitHub release). FF `main`, `git tag -a vX.Y.Z`.
 3. **Copilot gate** on the release diff `<main-before>..<release-commit>` BEFORE
-   the github push — it has found a real bug on every release (0.3.1 receive-field
-   collision, 0.3.2 empty case branch, 0.3.3 int literals + the terminates()/switch
-   gap). Fold findings via unwind → fix on `-work` (TDD + review) → re-squash →
-   re-tag → re-run the gate.
+   the github push — it has found a real silent-mis-transpile on EVERY release
+   (0.3.1 receive-field collision, 0.3.2 empty case branch, 0.3.3 non-decimal int
+   literals, 0.3.4 tag-collision + dropped init). Fold via unwind → fix on `-work`
+   (TDD) → re-squash → re-tag → re-run the gate.
 4. Push `main` + tag origin → upstream → github (+ dev branches to origin).
 5. `gh release create vX.Y.Z --repo bsmr/wintermute --verify-tag --title … --notes-file … --latest`.
 6. `production-X.Y.Z` from `main`, push origin only.
@@ -98,42 +105,49 @@ The gated-release flow, unchanged from 0.3.1/0.3.2/0.3.3:
 
 ## Backlog (deferred)
 
-- **0.3.3 non-blocking nits:** duplicate case values accepted (invalid Go; `erlc`
-  warns "cannot match"); the `emitSwitch` `WriteString` string-concat is a
-  cosmetic lint (`writestring` vet hint); an `emitCase(subject, clauses)` helper
-  would DRY the `emitIf`/`emitSwitch` case-construction duplication.
-- **0.3.2 nits:** boolean literals `true`/`false` rejected as lowercase idents
-  (so `if true {…}`/`switch true {…}` error — a safe false-negative).
-- **Older:** relup/appup hot upgrades; `bin/attach` for the target system;
-  native-interop follow-ups (native application module scan, `otp.Apply`, inline
-  escape hatch); shared command-preamble DRY; `bin/stop` async-stop residual;
-  `absEbin` unescaped in the release `-eval`. See git history / prior handovers.
+- **0.3.4 nits:** `structPattern` binds ALL declared fields; a multi-field struct
+  whose clause uses only some emits an `erlc` "variable X unused" warning
+  (non-pristine, shared with the 0.3.1 receive) — fix both call sites by
+  `_`-prefixing unreferenced fields. `receiveHead` rejects `*T` while the type
+  switch accepts `*T`→T (harmless: the subset can't construct a pointer value).
+  The `TestModule_TypeSwitchReceiveWithDefault` default body emits non-compiling
+  Erlang (`Data` unbound in the default) but the test only checks substrings —
+  tighten the fixture post-hoc. `emitTypeSwitchReceive`/`emitSwitch` `WriteString`
+  string-concat lint; `rangeint` lint at `transpile_test.go:559` (cosmetic).
+- **0.3.2 nits:** boolean literals `true`/`false` rejected as lowercase idents.
+- **Older:** relup/appup hot upgrades; `bin/attach`; native-interop follow-ups;
+  shared command-preamble DRY; `bin/stop` async residual; `absEbin` unescaped in
+  the release `-eval`. See git history / prior handovers.
 
 ## Gotchas
 
 - **Module path is `go.muehmer.eu/wintermute`**, not the GitHub repo path.
 - **Transpiler subset only** — errors on anything outside it, by design. As of
-  0.3.3: parameters, `return`, `:=`, calls/recursion, the full operator set,
-  `if`/`else` → `case`, tagged `switch` → `case`. Still error (0.3.4+):
-  no-default/multi-value/tagless/type `switch`, `else if` chains, side-effect-only
-  `if`, guards, multi-value return, cross-module plain calls.
+  0.3.4: parameters, `return`, `:=`, calls/recursion, the full operator set,
+  `if`/`else` → `case`, tagged `switch` → `case`, and `switch v :=
+  otp.Receive().(type)` → multi-clause `receive`. Still error (0.3.5+):
+  plain-value/non-struct/multi-type type switch, whole-alias `v`, `else if`,
+  side-effect-only `if`, guards, multi-value return, cross-module plain calls.
 - **New binding contexts must integrate with `em.bound`** (`bound-set-integration`
   memory): receive fields (0.3.1), `case` branches (0.3.2), `switch` clauses
-  (0.3.3) all snapshot/restore `bound` and reject outer collisions. A **type
-  switch's `v :=`** is the next such context.
-- **The Copilot release gate keeps finding real bugs** the internal reviews miss —
-  run it on the release diff before the github push and fold findings via
-  re-squash. Gated remotes receive only tagged releases from `main`, order
-  origin→upstream→github, plus a GitHub release per github push.
+  (0.3.3), type-switch clauses (0.3.4) all snapshot/restore `bound` and reject
+  outer collisions.
+- **The Copilot release gate keeps finding real silent-mis-transpiles** the
+  internal reviews (incl. opus) miss — run it on the release diff before the
+  github push and fold findings via re-squash. Gated remotes receive only tagged
+  releases from `main`, order origin→upstream→github, plus a GitHub release per
+  github push.
 - `.superpowers/` (SDD ledger) and `bin/` are gitignored scratch.
 - `testdata/` Go fixtures are not built by `go test ./...`; only read as source by
-  the transpiler / integration tests.
+  the transpiler / integration tests. Struct fixture fields MUST be typed
+  (`struct{ Data int }`), never bare `struct{ Data }` (Go embedded field → zero
+  registered fields).
 
 ## Key artifacts
 
-- 0.3.3 spec: `docs/superpowers/specs/2026-07-13-wintermute-0.3.3-switch-design.md`
-- 0.3.3 plan: `docs/superpowers/plans/2026-07-13-wintermute-0.3.3-switch.md`
-- released: `main` @ `5e569f1`, tag `v0.3.3`, `production-0.3.3`
+- 0.3.4 spec: `docs/superpowers/specs/2026-07-13-wintermute-0.3.4-type-switch-receive-design.md`
+- 0.3.4 plan: `docs/superpowers/plans/2026-07-13-wintermute-0.3.4-type-switch-receive.md`
+- released: `main` @ `7be3b1c`, tag `v0.3.4`, `production-0.3.4`
 - earlier specs/plans: `docs/superpowers/{specs,plans}/2026-07-1{0,1,2,3}-wintermute-0.*`
-- SDK index: `docs/SDK-INDEX.md` (unchanged in 0.3.3 — no `pkg/` change)
+- SDK index: `docs/SDK-INDEX.md` (unchanged in 0.3.4 — no `pkg/` change)
 - Project rules: `CLAUDE.md`
