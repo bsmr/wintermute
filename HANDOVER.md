@@ -2,68 +2,81 @@
 
 Snapshot for resuming work in a fresh session. Updated 2026-07-13.
 
-## Where things stand
+## ⏭️ RESUME HERE — 0.3.3 is BUILT & VERIFIED but NOT YET RELEASED
 
-**0.3.2 — control flow, the second step of the 0.3.x transpiler-language line —
-is RELEASED:** squash-merged to `main` = `ea16579` ("feat: Wintermute 0.3.2 —
-control flow"), tagged `v0.3.2`, pushed to ALL THREE remotes (`origin`,
-`upstream`, `github`); `production-0.3.2` created (origin only). The **GitHub
-release is live and marked Latest**:
-<https://github.com/bsmr/wintermute/releases/tag/v0.3.2>. `VERSION` is `0.3.2`.
+**The 0.3.3 (switch) work is complete, green, and whole-branch-review-approved,
+sitting on `development-0.3.3-work` @ `04767c9` (also pushed to `origin`). It is
+NOT merged to `main`, NOT tagged, NOT pushed to the gated remotes. The next
+action is the finishing flow.** `main` is still at `0866904` (0.3.3 spec + plan
+only); the last RELEASED version is **0.3.2** (`ea16579`, all three remotes).
 
-0.3.2 is a **feature step** (`X.Y.z`): it makes 0.3.1's recursion useful by adding
-operators and control flow.
+### Do this next: the 0.3.3 finishing flow
 
-### 0.3.2 delivered (transpiler control flow)
+Follow the project's gated-release ritual (see `CLAUDE.md`), exactly as 0.3.1/0.3.2:
 
-The flat function body became a **value-yielding tree** (an `if` in tail position
-emits a `case`), and the full operator set landed:
+1. **VERSION → `0.3.3`** on `development-0.3.3-work`, commit (`chore: bump VERSION to 0.3.3`).
+2. **Squash to main.** `git branch -f development-0.3.3-main main` (resync so the
+   fast-forward is clean — `main` may hold docs commits `-main` lacks), then
+   `git checkout development-0.3.3-main`, `git merge --squash development-0.3.3-work`,
+   `git commit -s` with subject **`feat: Wintermute 0.3.3 — switch`** and a body
+   describing the feature (write release notes to a scratch file first — reused
+   for the GitHub release, minus the `Co-Authored-By` trailer). Then
+   `git checkout main`, `git merge --ff-only development-0.3.3-main`, and
+   `git tag -a v0.3.3 -m "Wintermute 0.3.3 — switch"`.
+3. **Copilot gate on the release diff BEFORE the github push.** It has found a
+   REAL silent-mis-transpile bug on every release so far (0.3.1 receive-field
+   collision, 0.3.2 empty case branch, 0.3.3 non-decimal int literals — the last
+   caught by the internal opus review this time). Run:
+   `gh copilot -- -p "Review the git diff of the range <main-before>..<release-commit> …" --allow-all-tools`
+   and **fold any findings via re-squash before pushing** (unwind the local
+   merge/tag, fix on `-work` with TDD + review, re-squash, re-tag, re-run the gate).
+4. **Push** `main` + tag `v0.3.3` in order `origin` → `upstream` → `github`
+   (and the `development-0.3.3-*` branches to `origin` as archive — already done).
+5. **GitHub release** from the tag:
+   `gh release create v0.3.3 --repo bsmr/wintermute --verify-tag --title "Wintermute 0.3.3 — switch" --notes-file <notes> --latest`.
+6. **`production-0.3.3`** from `main`, push to `origin` only.
+7. **Refresh this handover** to the released state (mirror the 0.2.7→0.3.2 pattern),
+   and add a `README.md` roadmap/coverage/status row for 0.3.3 (the README is
+   updated per-release; it currently shows `0.3.2`).
 
-- **Operators** — arithmetic `- *`, `/`→`div`, `%`→`rem`; comparison `==`→`=:=`,
-  `!=`→`=/=`, `< > >=`, `<=`→`=<` (exact term equality, no coercion); boolean
-  `&&`→`andalso`, `||`→`orelse`, unary `!`→`not`. A binary operand that is itself
-  a binary expression is parenthesized (`emitOperand`/`unparen`), so Go's grouping
-  survives regardless of Erlang precedence. `ParenExpr` is unwrapped.
-- **`if` → Erlang `case`** — if/else and the bare-`if`-plus-continuation base case
-  (`if N==0 { return 1 }; return N*Fact(N-1)` → `case N =:= 0 of true -> 1;
-  false -> N * fact(N - 1) end`). **Each `case` branch is emitted in its own
-  binding scope**: `em.bound` is snapshotted (`maps.Clone`) and restored around
-  each branch (`emitBranch`), so sibling clauses may reuse a name freshly while a
-  collision with an outer binding — a parameter, a `:=`, or a **receive-pattern
-  field** — is still rejected. A `terminates()` helper rejects a bare-`if`
-  then-branch that would fall through. **Empty `if`/`else` branches are rejected**
-  (they would emit an invalid `true -> ;` case clause).
-- **Runnable rung** — `testdata/controlflow/fact.go` (recursive factorial)
-  transpiles, compiles with `erlc`, AND **runs** to `fact(5) = 120`.
+The full per-task detail lives in the SDD ledger
+`.superpowers/sdd/progress.md` (gitignored, local to the build machine) — read it
+if present; otherwise this section plus `git log development-0.3.3-work` is enough.
 
-Branch scoping was built per the `bound-set-integration` invariant (the class the
-0.3.1 Copilot gate caught for receive patterns); the branch × receive-field seam
-is now explicitly tested.
+### 0.3.3 delivered (on `development-0.3.3-work`, pending release)
 
-### How it was built and what the gate caught
+- **Tagged expression `switch` → Erlang `case`-on-value** (`emitSwitch`, mirrors
+  `emitIf`): single literal case values, a required `default` (emitted as the
+  catch-all `_`, sorted LAST regardless of Go source position), each clause body
+  in its own `bound` scope via `emitBranch`, empty clauses rejected, the switch
+  terminal + tail-position only. A type switch (`*ast.TypeSwitchStmt`) is rejected
+  in `emitStmt`. Deferred forms (no-default, multi-value cases, tagless, type
+  switch, `fallthrough`, init) all error → 0.3.4+.
+- **Integer-literal normalization** (from the Task-1 review's Critical): `emitExpr`
+  now normalizes every Go int literal to decimal Erlang via
+  `strconv.ParseInt(v, 0, 64)` + `FormatInt(n, 10)`. Previously `0777` emitted
+  `0777` (Erlang reads 777 — clean compile, WRONG value) and `0x1F` emitted
+  invalid Erlang; this was a PRE-EXISTING root cause (verbatim `BasicLit.Value`)
+  affecting `return 0x1F` too. Overflow → positioned error, not silent wrap.
+- **Runnable rung** — `testdata/switch/classify.go` transpiles, compiles with
+  `erlc`, and RUNS to `classify:name(2) = "two"`.
 
-4 subagent-driven tasks (fresh implementer + two-stage review each). The
-whole-branch opus review returned "ready to merge" after independently tracing
-the receive-field × branch-binding intersection and confirming rejection, and its
-recommended seam test was folded.
+Verification (2026-07-13, on `04767c9`): `go test ./...` green; ladder integration
+forced `-count=1` green (31.8s, incl. the switch rung); cli integration green
+(19.9s, after clearing a leftover-epmd flake — see `integration-test-leftover-nodes`);
+`pgrep beam.smp`=0; govulncheck/gitleaks clean; gosec 53/5 HIGH identical to the
+0.3.2 baseline, ZERO findings in the transpile package. Final whole-branch opus
+review: **ready to merge**; its two recommended coverage tests (string case value,
+receive-field switch tag) were folded (`04767c9`).
 
-**The Copilot gate again found a real bug the internal reviews missed:** an
-**empty `if`/`else` branch** emitted invalid Erlang (`case … of true -> ; … end`)
-silently — reachable via a valid void function. Fixed (folded via re-squash before
-the github push): `emitIf` rejects empty then/else blocks with a positioned
-"empty block" error. Copilot gate #2 on the corrected diff: clean, no remaining
-silent-wrong findings.
+---
 
-### Verification gate (all green) — 0.3.2, run 2026-07-13 on `ea16579`
+## Last released: 0.3.2 — control flow
 
-- `go build -o bin/wm ./cmd/wm` clean; `go test ./...` all 5 packages green.
-- `go test -tags integration ./internal/pkg/ladder/` green (31.7s, includes the
-  factorial-runs-to-120 rung); `go test -tags integration ./internal/pkg/cli/`
-  green (20s); `pgrep -xc beam.smp` = 0 after (no leaked nodes).
-- `govulncheck` clean; `gitleaks` clean; `gosec ./...` = **53 issues / 5 HIGH,
-  identical to the 0.3.1 baseline**, all 5 HIGH the accepted G703 class in
-  cli/release, **ZERO findings in the transpile package** (pure string emission,
-  no new security surface).
+0.3.2 (`ea16579`, tag `v0.3.2`, all three remotes, `production-0.3.2`, GitHub
+release Latest) added operators + `if` → Erlang `case`, turning the flat function
+body into a value-yielding tree and making recursion useful. See the git history
+and the GitHub releases page for the 0.1.0 → 0.3.2 line.
 
 ## Build & test
 
@@ -71,32 +84,27 @@ silent-wrong findings.
 go build -o bin/wm ./cmd/wm
 go test ./...
 ./bin/wm erlang install                              # OTP 29.0.3 -> ~/.local/erlang/29.0.3
-go test -tags integration ./internal/pkg/ladder/     # includes TestRung_ControlFlowRecursion (runs fact(5)=120)
-go test -tags integration ./internal/pkg/cli/
+go test -tags integration -count=1 ./internal/pkg/ladder/   # -count=1: transpile.go changed, don't trust the cache
+go test -tags integration -count=1 ./internal/pkg/cli/
 ```
 
-**Integration-test gotcha (mitigated since 0.3.0):** the CLI/ladder integration
-tests boot detached BEAM nodes; a SIGKILL sweep stops a failed `bin/stop` from
-leaking one. If a suite fails oddly after a hard interrupt, clear first:
+**Integration-test gotcha:** the CLI/ladder integration tests boot detached BEAM
+nodes. A leftover `epmd`/`beam.smp` from a prior run causes odd flaky failures
+(0.3.3's cli suite flaked once this way). Clear first:
 `pkill -9 -x beam.smp; pkill -9 -x epmd`, then re-run. See the
 `integration-test-leftover-nodes` memory.
 
-## Next step: 0.3.3 — `switch` → `case`-on-value (then behaviours)
+## Next line after 0.3.3 ships: 0.3.4
 
-0.3.2 is merged, tagged, and on all remotes — nothing pending. Suggested cut (each
-starts with `superpowers:brainstorming`):
+Suggested (each starts with `superpowers:brainstorming`):
 
-- **0.3.3 — `switch` → Erlang `case`-on-value:** the expression switch
-  (`switch x { case 1: …; default: … }` → `case x of 1 -> …; _ -> … end`) reuses
-  the 0.3.2 `case`/branch-scoping machinery, so it is mostly a new statement form
-  + clause emission. Decide the tagless-switch (→ if-chain) and type-switch (→
-  guards) scope then. **Note the `bound-set-integration` invariant applies again:**
-  switch-clause patterns bind Erlang variables — register + scope them exactly
-  like receive fields and `case` branches, or the 0.3.1/0.3.2-class collision bug
-  recurs.
-- **0.3.4+ — full gen_server callbacks** (`handle_cast`/`handle_info`/`terminate`/
-  `code_change`) and/or **`gen_statem` / `gen_event`**: mostly marker recognition
-  once the language core is complete.
+- **0.3.4 — widen `switch` and/or begin behaviours.** Candidates: `switch`
+  without `default` (the no-match case → the continuation, the bare-`if`
+  continuation model); multi-value cases (`case 1, 2:` → an Erlang guard); tagless
+  `switch` (→ an if/`case true` chain); **type switch** (`switch v := x.(type)` →
+  type guards `is_integer`/…) — note this DOES bind a name (`v`), a full
+  `bound-set-integration` context. Or move to full gen_server callbacks
+  (`handle_cast`/`handle_info`/`terminate`/`code_change`) / `gen_statem`.
 
 Framing (unchanged): the transpiler covers only what maps cleanly to Erlang;
 loops, list comprehensions, mutable state stay in the native-`.erl` escape hatch
@@ -104,41 +112,37 @@ loops, list comprehensions, mutable state stay in the native-`.erl` escape hatch
 
 ## Backlog (deferred)
 
-- **0.3.2 non-blocking nits:**
-  - **boolean literals `true`/`false`** are rejected as lowercase-leading idents
-    (so `if true { … }` errors) — a safe false-negative (errors, never
-    mis-transpiles), but a comfort gap; special-case them as Erlang atoms in 0.3.3.
-  - **if/else branches skip `terminates()`** — a non-terminating (but non-empty)
-    if/else branch in a void function yields `ok`, which is correct Go semantics,
-    but the spec calls side-effect-only `if` deferred. Route if/else branches
-    through `terminates()` for defense-in-depth when `go/types` integration lands.
-  - `switch` is rejected via the generic `emitStmt` default rather than a
-    roadmap-pointed message (cosmetic).
-- **relup/appup hot upgrades**; **`bin/attach`** for the target system;
-  **native-interop follow-ups** (native application module scan, `otp.Apply`,
-  inline escape hatch); **shared command-preamble DRY** (`start`/`release`);
-  **`bin/stop` async-stop residual**; **`absEbin` unescaped** in the release
-  `-eval` — all detailed in git history / prior handovers.
+- **0.3.3 non-blocking nits (roll-up, no valid-Go mis-transpile):** duplicate case
+  values accepted (invalid Go; `erlc` warns "cannot match"); a non-terminating
+  clause body accepted (invalid Go; consistent with if/else-branch leniency); the
+  `emitSwitch` `WriteString` string-concat is a cosmetic lint.
+- **0.3.2 nits:** boolean literals `true`/`false` rejected as lowercase idents
+  (so `if true { … }`/`switch true {…}` error — a safe false-negative, comfort
+  gap); if/else branches skip `terminates()` (correct output, defense-in-depth for
+  when `go/types` lands).
+- **Older:** relup/appup hot upgrades; `bin/attach` for the target system;
+  native-interop follow-ups (native application module scan, `otp.Apply`, inline
+  escape hatch); shared command-preamble DRY; `bin/stop` async-stop residual;
+  `absEbin` unescaped in the release `-eval`. See git history / prior handovers.
 
 ## Gotchas
 
 - **Module path is `go.muehmer.eu/wintermute`**, not the GitHub repo path.
-- **Transpiler subset only** — errors on anything outside it, by design. 0.3.2
-  added operators + `if`; `switch`, `else if` chains, side-effect-only `if`,
-  guards, multi-value return, cross-module plain calls all still error (0.3.3+).
+- **Transpiler subset only** — errors on anything outside it, by design. As of
+  0.3.3: parameters, `return`, `:=`, calls/recursion, the full operator set,
+  `if`/`else` → `case`, and the tagged `switch` → `case`. Still error (0.3.4+):
+  no-default/multi-value/tagless/type `switch`, `else if` chains, side-effect-only
+  `if`, guards, multi-value return, cross-module plain calls.
 - **New binding contexts must integrate with `em.bound`** (`bound-set-integration`
-  memory): receive fields (0.3.1) and `case` branches (0.3.2) both register into
-  `bound` and reject outer collisions / scope siblings. 0.3.3's switch patterns
-  are the next such context — do the same or the collision bug recurs.
-- **The Copilot release gate keeps finding real silent-mis-transpile bugs the
-  internal reviews miss** (0.3.1: receive-field collision; 0.3.2: empty case
-  branch). Run it on the release diff before the github push and **fold findings
-  via re-squash before pushing.** Gated remotes (`upstream`, `github`) receive
-  only tagged releases from `main`, in order origin→upstream→github. **On every
-  github push, also publish a GitHub release from the tag** (`gh release create
-  vX.Y.Z --repo bsmr/wintermute --verify-tag --title "Wintermute X.Y.Z —
-  <subtitle>" --notes-file <notes> --latest`; notes = the `feat:` commit body
-  minus the `Co-Authored-By` trailer) — see `CLAUDE.md`.
+  memory): receive fields (0.3.1), `case` branches (0.3.2), and `switch` clauses
+  (0.3.3) all snapshot/restore `bound` and reject outer collisions. A **type
+  switch's `v :=`** is the next such context — do the same or the collision bug
+  recurs.
+- **The Copilot release gate keeps finding real silent-mis-transpile bugs** the
+  internal reviews miss — run it on the release diff before the github push and
+  fold findings via re-squash. Gated remotes (`upstream`, `github`) receive only
+  tagged releases from `main`, in order origin→upstream→github. On every github
+  push, also publish a GitHub release from the tag (see `CLAUDE.md`).
 - `.superpowers/` (SDD ledger, task briefs/reports) and `bin/` are gitignored
   scratch. **Always regenerate `task-N-brief` fresh** (`scripts/task-brief`).
 - `testdata/` Go fixtures are not built by `go test ./...`; they are only read as
@@ -146,8 +150,9 @@ loops, list comprehensions, mutable state stay in the native-`.erl` escape hatch
 
 ## Key artifacts
 
-- 0.3.2 spec: `docs/superpowers/specs/2026-07-12-wintermute-0.3.2-control-flow-design.md`
-- 0.3.2 plan: `docs/superpowers/plans/2026-07-12-wintermute-0.3.2-control-flow.md`
-- earlier specs/plans: `docs/superpowers/{specs,plans}/2026-07-1{0,1,2}-wintermute-0.*`
-- SDK index: `docs/SDK-INDEX.md` (unchanged in 0.3.2 — no `pkg/` change)
+- 0.3.3 spec: `docs/superpowers/specs/2026-07-13-wintermute-0.3.3-switch-design.md`
+- 0.3.3 plan: `docs/superpowers/plans/2026-07-13-wintermute-0.3.3-switch.md`
+- 0.3.3 branch (unreleased): `development-0.3.3-work` @ `04767c9` (on `origin`)
+- earlier specs/plans: `docs/superpowers/{specs,plans}/2026-07-1{0,1,2,3}-wintermute-0.*`
+- SDK index: `docs/SDK-INDEX.md` (unchanged in 0.3.3 — no `pkg/` change)
 - Project rules: `CLAUDE.md`
