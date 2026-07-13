@@ -160,3 +160,32 @@ func TestRung_Switch(t *testing.T) {
 		t.Fatalf("name(2) = %q, want two", got)
 	}
 }
+
+// TestRung_TypeSwitchReceive transpiles a 0.3.4 type-switch receive, compiles it
+// with erlc, and RUNS it — proving the multi-clause receive dispatch closes: a
+// {ping, …} message hits the ping clause, a {pong, …} the pong clause.
+func TestRung_TypeSwitchReceive(t *testing.T) {
+	home, _ := os.UserHomeDir()
+	l := erlang.NewLayout(home, erlang.DefaultVersion)
+	if !l.Installed() {
+		t.Skip("local Erlang not installed; run erlang provisioning first")
+	}
+	dir := t.TempDir()
+	erl := transpileToErl(t, filepath.FromSlash("../../../testdata/typeswitch/dispatch.go"), dir)
+	if out, err := exec.Command(l.Erlc(), "-o", dir, erl).CombinedOutput(); err != nil {
+		t.Fatalf("erlc %s: %v\n%s", erl, err, out)
+	}
+	for _, tc := range []struct{ send, want string }{
+		{`{ping, <<"P">>}`, "P"},
+		{`{pong, <<"Q">>}`, "Q"},
+	} {
+		eval := "self() ! " + tc.send + ", io:format(\"~s\", [dispatch:handle()]), init:stop()."
+		out, err := exec.Command(l.Erl(), "-noshell", "-pa", dir, "-eval", eval).CombinedOutput()
+		if err != nil {
+			t.Fatalf("run %s: %v\n%s", tc.send, err, out)
+		}
+		if got := strings.TrimSpace(string(out)); got != tc.want {
+			t.Fatalf("send %s: got %q, want %q", tc.send, got, tc.want)
+		}
+	}
+}

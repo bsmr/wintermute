@@ -772,6 +772,21 @@ func Handle() int {
 	}
 }
 
+func TestModule_ReceiveUnknownStructTypeRejected(t *testing.T) {
+	// otp.Receive().(T) where T is not a declared struct must be rejected,
+	// not silently emitted as a fieldless {t} pattern.
+	src := `package m
+import "go.muehmer.eu/wintermute/pkg/otp"
+func F() {
+	M := otp.Receive().(Ghost)
+	otp.Print(M.Whatever)
+}`
+	_, err := Module(src)
+	if err == nil || !strings.Contains(err.Error(), "unknown struct type") {
+		t.Fatalf("want unknown-struct-type rejection, got %v", err)
+	}
+}
+
 // Positive counterpart: an if in tail position inside a receive clause body is
 // accepted and emits a case over the received field.
 func TestModule_IfInReceiveClauseBody(t *testing.T) {
@@ -1096,6 +1111,31 @@ func F(N int) string {
 	}
 }
 
+func TestModule_BareIfTypeSwitchReceiveThenAccepted(t *testing.T) {
+	// A bare-if whose then-branch is a type-switch receive yields a value and
+	// does not fall through (a receive proceeds only on a match), so it may be
+	// the then-branch, exactly like an if/else — no default required.
+	src := `package m
+import "go.muehmer.eu/wintermute/pkg/otp"
+type Ping struct{ Data int }
+func F(N int) string {
+	if N > 0 {
+		switch v := otp.Receive().(type) {
+		case Ping:
+			return v.Data
+		}
+	}
+	return "skip"
+}`
+	out, err := Module(src)
+	if err != nil {
+		t.Fatalf("want bare-if-with-type-switch-receive accepted, got %v", err)
+	}
+	if !strings.Contains(out.Erl, "case N > 0 of") || !strings.Contains(out.Erl, "receive") {
+		t.Fatalf("want both the bare-if case and the receive, got:\n%s", out.Erl)
+	}
+}
+
 func TestModule_UnreachableAfterIfElseRejected(t *testing.T) {
 	src := `package m
 func F(N int) int {
@@ -1398,5 +1438,176 @@ func F(N int) int {
 	}
 	if !strings.Contains(r.Erl, "511 -> 1") || strings.Contains(r.Erl, "0777") {
 		t.Errorf("want case 511 (not 0777), got:\n%s", r.Erl)
+	}
+}
+
+func TestModule_TypeSwitchReceiveWithDefault(t *testing.T) {
+	src := `package m
+import "go.muehmer.eu/wintermute/pkg/otp"
+type Ping struct{ Data int }
+type Pong struct{ To int }
+func Handle() {
+	switch v := otp.Receive().(type) {
+	case Ping:
+		otp.Print(v.Data)
+	case *Pong:
+		otp.Print(v.To)
+	default:
+		otp.Print(Data)
+	}
+}`
+	out, err := Module(src)
+	if err != nil {
+		t.Fatalf("want type-switch receive accepted, got %v", err)
+	}
+	// `case Ping` and `case *Pong` must both lower to the same tuple tag —
+	// Erlang has no pointers, so the star is meaningless.
+	for _, want := range []string{"receive", "{ping, Data} ->", "{pong, To} ->", "_ ->", "end"} {
+		if !strings.Contains(out.Erl, want) {
+			t.Fatalf("missing %q in:\n%s", want, out.Erl)
+		}
+	}
+}
+
+func TestModule_TypeSwitchReceiveSelectiveNoDefault(t *testing.T) {
+	src := `package m
+import "go.muehmer.eu/wintermute/pkg/otp"
+type Ping struct{ Data int }
+type Pong struct{ To int }
+func Handle() {
+	switch v := otp.Receive().(type) {
+	case Ping:
+		otp.Print(v.Data)
+	case Pong:
+		otp.Print(v.To)
+	}
+}`
+	out, err := Module(src)
+	if err != nil {
+		t.Fatalf("want selective receive accepted, got %v", err)
+	}
+	if !strings.Contains(out.Erl, "{ping, Data} ->") || !strings.Contains(out.Erl, "{pong, To} ->") {
+		t.Fatalf("missing struct clauses in:\n%s", out.Erl)
+	}
+	if strings.Contains(out.Erl, "_ ->") {
+		t.Fatalf("selective receive must have no catch-all, got:\n%s", out.Erl)
+	}
+}
+
+func TestModule_TypeSwitchReceiveUnreachableAfterRejected(t *testing.T) {
+	// A type-switch receive is terminal + tail-position; a statement after it is
+	// unreachable. emitStmts rejects it, so no emitStmt fallback case is needed.
+	src := `package m
+import "go.muehmer.eu/wintermute/pkg/otp"
+type Ping struct{ Data int }
+func F() {
+	switch v := otp.Receive().(type) {
+	case Ping:
+		otp.Print(v.Data)
+	}
+	otp.Print(Data)
+}`
+	_, err := Module(src)
+	if err == nil || !strings.Contains(err.Error(), "unreachable statement after a type switch") {
+		t.Fatalf("want unreachable-after rejection, got %v", err)
+	}
+}
+
+func TestModule_TypeSwitchRejects(t *testing.T) {
+	cases := []struct {
+		name, src, want string
+	}{
+		{
+			name: "plain value operand",
+			src: `package m
+type Ping struct{ Data int }
+func F(X int) {
+	switch v := X.(type) {
+	case Ping:
+		_ = v
+	}
+}`,
+			want: "plain value",
+		},
+		{
+			name: "non-struct case",
+			src: `package m
+import "go.muehmer.eu/wintermute/pkg/otp"
+func F() {
+	switch v := otp.Receive().(type) {
+	case int:
+		otp.Print(v)
+	}
+}`,
+			want: "must name a struct type",
+		},
+		{
+			name: "multi-type case",
+			src: `package m
+import "go.muehmer.eu/wintermute/pkg/otp"
+type Ping struct{ Data int }
+type Pong struct{ To int }
+func F() {
+	switch v := otp.Receive().(type) {
+	case Ping, Pong:
+		otp.Print(v.Data)
+	}
+}`,
+			want: "multi-type case",
+		},
+		{
+			name: "bare alias",
+			src: `package m
+import "go.muehmer.eu/wintermute/pkg/otp"
+type Ping struct{ Data int }
+func F() {
+	switch v := otp.Receive().(type) {
+	case Ping:
+		otp.Send(v.Data, v)
+	}
+}`,
+			want: "must be used via field access",
+		},
+		{
+			// `case Ping` and `case *Ping` are distinct Go types but both lower
+			// to the tag `ping`; emitting both would make the second clause
+			// unreachable dead code in Erlang. Reject the tag collision.
+			name: "duplicate tag (star vs non-star)",
+			src: `package m
+import "go.muehmer.eu/wintermute/pkg/otp"
+type Ping struct{ Data int }
+func F() {
+	switch v := otp.Receive().(type) {
+	case Ping:
+		otp.Print(v.Data)
+	case *Ping:
+		otp.Print(v.Data)
+	}
+}`,
+			want: "same message tag",
+		},
+		{
+			// An init statement (switch n := f(); v := x.(type)) would be
+			// silently dropped; reject it like emitIf/emitSwitch do.
+			name: "init statement",
+			src: `package m
+import "go.muehmer.eu/wintermute/pkg/otp"
+type Ping struct{ Data int }
+func F() {
+	switch N := 1; v := otp.Receive().(type) {
+	case Ping:
+		otp.Print(v.Data)
+	}
+}`,
+			want: "init statement is unsupported",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := Module(tc.src)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("want %q rejection, got %v", tc.want, err)
+			}
+		})
 	}
 }
