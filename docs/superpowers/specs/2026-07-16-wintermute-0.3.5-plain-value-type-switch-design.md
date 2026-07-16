@@ -61,9 +61,12 @@ clause loop) plus a thin new value path.
   struct type declared in the module (`case Ping:` or `case *Ping:` — the star is
   meaningless in Erlang and accepted, as in 0.3.4).
 - Operand `X` is any expression `emitExpr` already supports (a parameter, a call
-  result, a field access). The valid-Go idiom is an `interface{}`/`any`-typed
+  result, a field access). The valid-Go operand is an `interface{}`/`any`-typed
   parameter (a type switch requires an interface operand in Go); the transpiler
-  ignores types and emits `X` verbatim.
+  ignores types and emits `X` verbatim. Per the project-wide rule, the operand
+  identifier must be uppercase-leading (an Erlang variable) — e.g. `M any`, not
+  `m any` — so `emitExpr` accepts it; a lowercase operand is rejected as for any
+  bare ident.
 - Optional `default:` → trailing catch-all `_ ->`.
 - `v.Field` in a clause body → the bound Erlang field variable (`SelectorExpr`
   discards the `v` alias, unchanged from 0.3.4).
@@ -148,15 +151,16 @@ cleaner — an implementation detail for the plan).
 
 ## Runnable rung
 
-New fixture `testdata/typeswitch/classify.go`: a function with an `interface{}`
-(or `any`) parameter that classifies it over two declared struct types via a
-plain-value type switch (valid Go — the interface operand makes `.(type)` legal).
+New fixture `testdata/typeswitch/classify.go`: a function with an `any` parameter
+that classifies it over two declared struct types via a plain-value type switch
+(valid Go — the interface operand makes `.(type)` legal). The operand and alias
+are uppercase (Erlang-variable rule).
 
 ```go
 type Ping struct{ Data int }
 type Pong struct{ Data int }
 
-func Classify(m any) { … switch v := m.(type) { case Ping: …; case Pong: …; default: … } }
+func Classify(M any) { … switch V := M.(type) { case Ping: …; case Pong: …; default: … } }
 ```
 
 The ladder integration test transpiles it, compiles with `erlc`, and calls the
