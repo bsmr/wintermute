@@ -67,7 +67,8 @@ clause loop) plus a thin new value path.
   identifier must be uppercase-leading (an Erlang variable) — e.g. `M any`, not
   `m any` — so `emitExpr` accepts it; a lowercase operand is rejected as for any
   bare ident.
-- Optional `default:` → trailing catch-all `_ ->`.
+- **Required** `default:` → trailing catch-all `_ ->` (see the revision note under
+  "Wrapper and default"; the value form must be total).
 - `v.Field` in a clause body → the bound Erlang field variable (`SelectorExpr`
   discards the `v` alias, unchanged from 0.3.4).
 - Multiple cases with distinct message tags; struct fields bound per clause in a
@@ -95,16 +96,25 @@ Whatever `emitExpr` accepts is accepted; whatever it rejects still errors.
 
 ### Wrapper and default
 
+> **Revised during the 0.3.5 release (Copilot gate).** This section originally
+> made `default:` optional with let-it-crash on no-match. The release gate proved
+> that a silent mis-transpile: a default-less value type switch **falls through**
+> in Go when no case matches (ordinary control flow — it proceeds to whatever
+> follows), whereas a total Erlang `case` with no catch-all raises `case_clause`.
+> Go returns normally where Erlang crashes. The value form therefore **requires a
+> default** (a receive, which blocks on a non-match and never falls through, keeps
+> it optional). The corrected rules:
+
 - With at least one struct case → `case <X> of\n  <pattern> -> <body>;\n  … \nend`.
-- `default:` optional. With → trailing `_ -> <body>`. **Without → no catch-all.**
-  A value that matches no clause is an Erlang `case_clause` runtime error
-  (let-it-crash) — this is the honest Erlang behaviour and is consistent with the
-  receive path leaving no `_ ->`. This differs from Go, where an unmatched type
-  switch with no default falls through to nothing; the transpiler does not model
-  that fall-through (the type switch is in tail position and must yield a value).
-- `terminates()` counts a plain-value type switch as terminating (with or without
-  default) — an Erlang `case` never falls through (it yields a value or crashes),
-  exactly like the receive path. So it may be the then-branch of a bare `if`.
+- `default:` is **required** for the value form. With → trailing `_ -> <body>`
+  (the catch-all makes the `case` total). **Without → rejected** with "a
+  plain-value type switch requires a default clause" — the default-less form
+  falls through in Go, which a total Erlang `case` cannot express.
+- `terminates()` counts a plain-value type switch as terminating **only with a
+  default** (`isReceiveTypeSwitch(s) || hasDefault`): a value `case` falls through
+  in Go without a default, so a default-less one does not terminate and may not be
+  a bare-`if` then-branch. A **receive** type switch still terminates without a
+  default (it blocks on a non-match, never falling through).
 
 ### Clause body and field binding
 
@@ -166,15 +176,17 @@ func Classify(M any) { … switch V := M.(type) { case Ping: …; case Pong: …
 The ladder integration test transpiles it, compiles with `erlc`, and calls the
 transpiled function directly from the Erlang side with `{ping, 1}` and `{pong, 2}`
 (this sidesteps struct-literal construction, which the subset does not model) —
-asserting both branches. A no-default no-match `case_clause` crash may be asserted
-as a negative case if cheap; otherwise the `default:` branch covers the miss path.
+asserting both branches. The fixture carries a `default:` (required for the value
+form), so a non-matching value takes the catch-all rather than crashing.
 
 ## Testing (TDD, red → green)
 
 Unit tests in `transpile_test.go`:
 
 - plain-value type switch **with** default → `case X of … ; _ -> … end`.
-- plain-value type switch **without** default → `case X of … end`, no `_ ->`.
+- plain-value type switch **without** default → **rejected** ("requires a default
+  clause"), in tail position and as a bare-`if` then-branch (the fall-through
+  regression the release gate caught).
 - `v.Field` in a clause body binds to the field variable.
 - two cases with distinct tags emit both clauses in order.
 - **inherited rejections still fire on the value path:** tag collision
