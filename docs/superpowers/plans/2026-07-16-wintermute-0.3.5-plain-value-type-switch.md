@@ -1,6 +1,6 @@
 # Wintermute 0.3.5 — Plain-value type switch Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** Lower `switch v := X.(type)` over any value operand `X` (struct-typed cases) to an Erlang `case X of … end`, generalizing the 0.3.4 receive type switch to the value operand.
 
@@ -60,12 +60,12 @@ Extract the per-clause loop from `emitTypeSwitchReceive` into a reusable helper.
 **Interfaces:**
 - Produces: `func (em *emitter) emitTypeSwitchClauses(ts *ast.TypeSwitchStmt) ([]string, error)` — returns the ordered Erlang clause strings (`"<pattern> -> <body>"`), including a trailing `"_ -> <deflt>"` when a `default:` is present. Rejects: non-`*ast.CaseClause` body entries, empty clause bodies, a second `default`, multi-type cases, non-struct cases (via `caseTypeName`), and duplicate message tags. Snapshots/restores `em.bound` per clause. Assumes `em.tsAlias` is already set by the caller.
 
-- [ ] **Step 1: Confirm the receive suite is green (baseline)**
+- [x] **Step 1: Confirm the receive suite is green (baseline)**
 
 Run: `go test ./internal/pkg/transpile/ -run TypeSwitchReceive -v`
 Expected: PASS (all existing 0.3.4 receive tests). This is the baseline the refactor must preserve.
 
-- [ ] **Step 2: Extract the helper**
+- [x] **Step 2: Extract the helper**
 
 In `transpile.go`, add the new helper (place it directly after `emitTypeSwitchReceive`). Move the clause loop body verbatim out of `emitTypeSwitchReceive`:
 
@@ -138,7 +138,7 @@ func (em *emitter) emitTypeSwitchClauses(ts *ast.TypeSwitchStmt) ([]string, erro
 
 (The `(0.3.5+)` string in the multi-type error is bumped to `(0.3.6+)` in Task 3 — leave it as-is here to keep this a behaviour-preserving refactor.)
 
-- [ ] **Step 3: Reduce `emitTypeSwitchReceive` to call the helper**
+- [x] **Step 3: Reduce `emitTypeSwitchReceive` to call the helper**
 
 Replace the body of `emitTypeSwitchReceive` so it keeps its current pre-work (gate, alias, `tsAlias`, init reject) but delegates the loop:
 
@@ -173,12 +173,12 @@ func (em *emitter) emitTypeSwitchReceive(ts *ast.TypeSwitchStmt) (string, error)
 }
 ```
 
-- [ ] **Step 4: Run the full suite to verify the refactor is green**
+- [x] **Step 4: Run the full suite to verify the refactor is green**
 
 Run: `go test ./internal/pkg/transpile/ -count=1`
 Expected: PASS (identical behaviour; the receive tests still pass).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add internal/pkg/transpile/transpile.go
@@ -201,7 +201,7 @@ Add the value lowering. A new `emitTypeSwitch` entry point owns the alias/`tsAli
   - `func (em *emitter) emitTypeSwitch(ts *ast.TypeSwitchStmt) (string, error)` — the single entry point. Rejects the tagless form and an init statement, sets `em.tsAlias`, dispatches: `isReceiveTypeSwitch` → receive wrapper, else → value wrapper.
   - `func (em *emitter) emitTypeSwitchValue(ts *ast.TypeSwitchStmt) (string, error)` — emits `case <operand> of <clauses> end`; the operand is `ts.Assign.(*ast.AssignStmt).Rhs[0].(*ast.TypeAssertExpr).X` via `emitExpr`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Add to `internal/pkg/transpile/transpile_test.go`:
 
@@ -284,12 +284,12 @@ func Classify(M any) {
 
 > Confirm the exact `Result` field name for the Erlang output (`r.Erl` above) against the existing tests in `transpile_test.go` and match it; adjust if the field is named differently.
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [x] **Step 2: Run the tests to verify they fail**
 
 Run: `go test ./internal/pkg/transpile/ -run 'TypeSwitchValue|TypeSwitchTagless' -v`
 Expected: FAIL — `TestModule_TypeSwitchValueWithDefault`/`NoDefault` hit `"type switch on a plain value is unsupported (0.3.5+)"`; `TaglessRejected` gets the wrong error text.
 
-- [ ] **Step 3: Add the entry point and value wrapper; thin the receive wrapper**
+- [x] **Step 3: Add the entry point and value wrapper; thin the receive wrapper**
 
 In `transpile.go`, add `emitTypeSwitch` and `emitTypeSwitchValue`, and remove the alias/`tsAlias`/init pre-work + the `isReceiveTypeSwitch` gate from `emitTypeSwitchReceive` (they move to the entry point):
 
@@ -378,12 +378,12 @@ Finally, in `emitStmts` change the type-switch dispatch (~line 351) from `em.emi
 			e, err := em.emitTypeSwitch(ts)
 ```
 
-- [ ] **Step 4: Run the tests to verify they pass**
+- [x] **Step 4: Run the tests to verify they pass**
 
 Run: `go test ./internal/pkg/transpile/ -run 'TypeSwitch' -count=1 -v`
 Expected: PASS — the new value tests and every existing receive test.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add internal/pkg/transpile/transpile.go internal/pkg/transpile/transpile_test.go
@@ -403,7 +403,7 @@ The value path routes through `emitTypeSwitchClauses` and the `emitTypeSwitch` e
 **Interfaces:**
 - Consumes: everything from Tasks 1–2. No new exported behaviour.
 
-- [ ] **Step 1: Write the lock tests**
+- [x] **Step 1: Write the lock tests**
 
 Add to `internal/pkg/transpile/transpile_test.go`:
 
@@ -482,12 +482,12 @@ func Classify(M any, Flag bool) {
 
 > Match `r.Erl` / `f() any` to the codebase: confirm the `Result` field name and that a zero-arg helper returning `any` is the lightest way to give the init-statement case a valid RHS. If the existing tests use a different idiom for an init statement, mirror it.
 
-- [ ] **Step 2: Run the lock tests**
+- [x] **Step 2: Run the lock tests**
 
 Run: `go test ./internal/pkg/transpile/ -run 'TypeSwitchValueGuards|TypeSwitchValueAsBareIf' -count=1 -v`
 Expected: PASS for every sub-case — the value path already inherits each guard, and `terminates()` already accepts a type switch. (A FAIL means the refactor leaked a guard; fix before proceeding.)
 
-- [ ] **Step 3: Bump the deferred-feature version strings and update the comment**
+- [x] **Step 3: Bump the deferred-feature version strings and update the comment**
 
 In `transpile.go`:
 
@@ -509,12 +509,12 @@ with:
 		// through (it yields a matched clause's value or raises case_clause).
 ```
 
-- [ ] **Step 4: Run the full transpile suite**
+- [x] **Step 4: Run the full transpile suite**
 
 Run: `go test ./internal/pkg/transpile/ -count=1`
 Expected: PASS (message-text assertions, if any, still match — no test pins the `(0.3.5+)` substring; if one does, update it to `(0.3.6+)`).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add internal/pkg/transpile/transpile.go internal/pkg/transpile/transpile_test.go
@@ -534,12 +534,12 @@ Prove the value type switch transpiles, compiles with `erlc`, and runs: call the
 **Interfaces:**
 - Consumes: the full transpile → `erlc` → run pipeline exercised by the existing `TestRung_TypeSwitchReceive` (0.3.4). Mirror its structure exactly (transpile the fixture, write the `.erl`, `erlc`, boot a node, call the function, capture output).
 
-- [ ] **Step 1: Read the existing rung to mirror it**
+- [x] **Step 1: Read the existing rung to mirror it**
 
 Run: `grep -n "TestRung_TypeSwitchReceive" internal/pkg/ladder/ladder_integration_test.go`
 Then read that test and the `testdata/typeswitch/dispatch.go` fixture it drives — copy their structure (build tags, node boot, `erlc` invocation, output capture). Match the established pattern; do not invent a new harness.
 
-- [ ] **Step 2: Create the fixture**
+- [x] **Step 2: Create the fixture**
 
 Create `testdata/typeswitch/classify.go` (valid Go; uppercase operand/alias per the Erlang-variable rule; fields typed):
 
@@ -566,11 +566,11 @@ func Classify(M any) {
 
 > Confirm the fixture package name and `otp.Print`'s Erlang lowering against `testdata/typeswitch/dispatch.go`; keep them identical in style. If the ladder harness calls an exported entry differently (e.g. a wrapper that starts a process), follow whatever `dispatch.go` does.
 
-- [ ] **Step 3: Write the failing integration test**
+- [x] **Step 3: Write the failing integration test**
 
 Add `TestRung_TypeSwitchValue` to `ladder_integration_test.go`, mirroring `TestRung_TypeSwitchReceive`. It transpiles `testdata/typeswitch/classify.go`, compiles with `erlc`, calls `classify:classify({ping, 1})` and `classify:classify({pong, 2})` from the Erlang side, and asserts the output contains `1` (ping clause) and `2` (pong clause). Use the exact node-boot / call idiom from the receive rung.
 
-- [ ] **Step 4: Run the integration test to verify it fails**
+- [x] **Step 4: Run the integration test to verify it fails**
 
 First clear any leftover BEAM nodes (integration-test gotcha):
 
@@ -581,14 +581,14 @@ pkill -9 -x beam.smp; pkill -9 -x epmd
 Run: `go test -tags integration -count=1 -run TestRung_TypeSwitchValue ./internal/pkg/ladder/ -v`
 Expected: FAIL (fixture not yet wired / assertion mismatch — confirm it fails for the right reason, not a harness typo).
 
-- [ ] **Step 5: Make it pass**
+- [x] **Step 5: Make it pass**
 
 Fix the fixture / test wiring until the transpiled module compiles and both clauses fire. If `erlc` errors, read the emitted `.erl` (the harness writes it to a temp dir) and reconcile with the receive rung's known-good output.
 
 Run: `go test -tags integration -count=1 -run TestRung_TypeSwitchValue ./internal/pkg/ladder/ -v`
 Expected: PASS.
 
-- [ ] **Step 6: Full verification**
+- [x] **Step 6: Full verification**
 
 ```bash
 pkill -9 -x beam.smp; pkill -9 -x epmd
@@ -599,7 +599,7 @@ go test -tags integration -count=1 ./internal/pkg/cli/
 
 Expected: all PASS.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add testdata/typeswitch/classify.go internal/pkg/ladder/ladder_integration_test.go
