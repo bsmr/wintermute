@@ -348,7 +348,7 @@ func (em *emitter) emitStmts(list []ast.Stmt, isTail bool) (string, error) {
 			if i != len(list)-1 {
 				return "", em.errorf(list[i+1], "unreachable statement after a type switch")
 			}
-			e, err := em.emitTypeSwitchReceive(ts)
+			e, err := em.emitTypeSwitch(ts)
 			if err != nil {
 				return "", err
 			}
@@ -463,16 +463,23 @@ func terminates(list []ast.Stmt) bool {
 		}
 		return hasDefault
 	case *ast.TypeSwitchStmt:
-		// A type-switch receive terminates once every clause terminates; unlike
-		// a case-switch it needs NO default, because a receive cannot fall
-		// through — it proceeds only on a match and yields that clause's value.
+		// A receive type switch terminates once every clause terminates, with NO
+		// default needed: a receive blocks until a message matches and yields
+		// that clause's value — it never falls through. A value type switch, like
+		// a value case-switch, DOES fall through in Go when no case matches and
+		// there is no default, so it terminates only with a default present
+		// (emitTypeSwitchValue also requires one).
+		hasDefault := false
 		for _, cc := range s.Body.List {
 			clause, ok := cc.(*ast.CaseClause)
 			if !ok || !terminates(clause.Body) {
 				return false
 			}
+			if clause.List == nil {
+				hasDefault = true
+			}
 		}
-		return true
+		return isReceiveTypeSwitch(s) || hasDefault
 	default:
 		return false
 	}
@@ -564,79 +571,74 @@ func (em *emitter) emitSwitch(sw *ast.SwitchStmt) (string, error) {
 	return b.String(), nil
 }
 
-// emitTypeSwitchReceive lowers `switch v := otp.Receive().(type)` to a
-// multi-clause Erlang `receive {tag, Field…} -> body; … end`. Each case names a
-// single declared struct type; its fields are bound in a per-clause scope
-// (em.bound snapshotted and restored) via structPattern, exactly like the
-// single-clause receive. A `default:` becomes a trailing catch-all `_`; without
-// it the receive is selective (non-matching messages stay in the mailbox). Only
-// the otp.Receive() operand is supported here (isReceiveTypeSwitch gates entry).
-func (em *emitter) emitTypeSwitchReceive(ts *ast.TypeSwitchStmt) (string, error) {
-	if !isReceiveTypeSwitch(ts) {
-		return "", em.errorf(ts, "type switch on a plain value is unsupported (0.3.5+); the operand must be otp.Receive()")
+// emitTypeSwitch dispatches a tail-position type switch on its operand. The
+// alias-binding form `switch V := X.(type)` is required (the tagless form and
+// an init statement are rejected). em.tsAlias is set for the whole emission so
+// V.Field resolves in clause bodies and a bare V is rejected. otp.Receive() as
+// the operand lowers to a multi-clause `receive`; any other value lowers to a
+// `case X of … end`.
+func (em *emitter) emitTypeSwitch(ts *ast.TypeSwitchStmt) (string, error) {
+	as, ok := ts.Assign.(*ast.AssignStmt)
+	if !ok || as.Tok != token.DEFINE || len(as.Lhs) != 1 || len(as.Rhs) != 1 {
+		return "", em.errorf(ts, "type switch must bind an alias (switch V := X.(type)); the tagless form is unsupported (0.3.6+)")
 	}
-	as := ts.Assign.(*ast.AssignStmt) // safe: isReceiveTypeSwitch verified the shape
 	alias := as.Lhs[0].(*ast.Ident).Name
 	old := em.tsAlias
 	em.tsAlias = alias
 	defer func() { em.tsAlias = old }()
 	if ts.Init != nil {
-		return "", em.errorf(ts, "type switch with an init statement is unsupported (0.3.5+)")
+		return "", em.errorf(ts, "type switch with an init statement is unsupported (0.3.6+)")
 	}
-	var clauses []string
-	var deflt string
-	haveDefault := false
-	seenTag := map[string]bool{} // reject two cases lowering to the same Erlang tag
-	for _, s := range ts.Body.List {
-		cc, ok := s.(*ast.CaseClause)
-		if !ok {
-			return "", em.errorf(s, "unsupported type-switch clause")
-		}
-		if len(cc.Body) == 0 {
-			return "", em.errorf(cc, "case clause has no value (empty body)")
-		}
-		if cc.List == nil { // default
-			if haveDefault {
-				return "", em.errorf(cc, "type switch has more than one default")
-			}
-			haveDefault = true
-			body, err := em.emitBranch(cc.Body)
-			if err != nil {
-				return "", err
-			}
-			deflt = body
-			continue
-		}
-		if len(cc.List) != 1 {
-			return "", em.errorf(cc, "multi-type case is unsupported (0.3.5+)")
-		}
-		name, err := em.caseTypeName(cc.List[0])
-		if err != nil {
-			return "", err
-		}
-		tag := strings.ToLower(name)
-		if seenTag[tag] {
-			return "", em.errorf(cc.List[0], "type switch has two cases with the same message tag %q; the second clause would be unreachable in Erlang (e.g. Ping and *Ping, or names differing only in case)", tag)
-		}
-		seenTag[tag] = true
-		snap := maps.Clone(em.bound)
-		pat, err := em.structPattern(name, cc)
-		if err != nil {
-			em.bound = snap
-			return "", err
-		}
-		body, err := em.emitStmts(cc.Body, true)
-		em.bound = snap
-		if err != nil {
-			return "", err
-		}
-		clauses = append(clauses, pat+" -> "+body)
+	if isReceiveTypeSwitch(ts) {
+		return em.emitTypeSwitchReceive(ts)
 	}
-	if haveDefault {
-		clauses = append(clauses, "_ -> "+deflt)
+	return em.emitTypeSwitchValue(ts)
+}
+
+// emitTypeSwitchValue lowers `switch V := X.(type)` over a plain value X to an
+// Erlang `case X of {tag, Field…} -> body; … end`. Struct-typed cases only,
+// reusing emitTypeSwitchClauses. A `default:` is REQUIRED: unlike a receive
+// (which blocks until a message matches), a value type switch with no matching
+// case falls through in Go — ordinary control flow — which a total Erlang
+// `case` cannot express (it would raise case_clause instead). So a default-less
+// value switch is rejected rather than silently mis-transpiled; the default
+// becomes the trailing `_ ->` catch-all.
+func (em *emitter) emitTypeSwitchValue(ts *ast.TypeSwitchStmt) (string, error) {
+	ta := ts.Assign.(*ast.AssignStmt).Rhs[0].(*ast.TypeAssertExpr)
+	operand, err := em.emitExpr(ta.X)
+	if err != nil {
+		return "", err
 	}
+	clauses, haveDefault, err := em.emitTypeSwitchClauses(ts)
+	if err != nil {
+		return "", err
+	}
+	if !haveDefault {
+		return "", em.errorf(ts, "a plain-value type switch requires a default clause; without it a value matching no case falls through in Go, which a total Erlang `case` cannot express")
+	}
+	return wrapClauses("case "+operand+" of", clauses), nil
+}
+
+// emitTypeSwitchReceive wraps the shared clauses in a multi-clause `receive`.
+// Precondition: em.tsAlias is set and the operand is otp.Receive() (guaranteed
+// by emitTypeSwitch, which dispatches here only when isReceiveTypeSwitch holds).
+// A default is optional here: without it the receive is selective (it blocks on
+// a non-matching message rather than falling through).
+func (em *emitter) emitTypeSwitchReceive(ts *ast.TypeSwitchStmt) (string, error) {
+	clauses, _, err := em.emitTypeSwitchClauses(ts)
+	if err != nil {
+		return "", err
+	}
+	return wrapClauses("receive", clauses), nil
+}
+
+// wrapClauses assembles an Erlang clause block: `<header>\n  C1;\n  C2\nend`,
+// each clause indented and semicolon-separated. Shared by the receive
+// (header "receive") and value (header "case X of") type-switch wrappers.
+func wrapClauses(header string, clauses []string) string {
 	var b strings.Builder
-	b.WriteString("receive\n")
+	b.WriteString(header)
+	b.WriteString("\n")
 	for i, c := range clauses {
 		b.WriteString(indent(c))
 		if i < len(clauses)-1 {
@@ -645,7 +647,74 @@ func (em *emitter) emitTypeSwitchReceive(ts *ast.TypeSwitchStmt) (string, error)
 		b.WriteString("\n")
 	}
 	b.WriteString("end")
-	return b.String(), nil
+	return b.String()
+}
+
+// emitTypeSwitchClauses emits the ordered Erlang clauses for a type switch's
+// case bodies: one "Pattern -> Body" per struct case, plus a trailing
+// "_ -> Body" when a default: is present. Each clause names a single declared
+// struct type (caseTypeName), binds its fields in a snapshotted em.bound scope
+// (structPattern), and two cases lowering to the same message tag are rejected
+// (the second would be unreachable in Erlang). em.tsAlias must be set by the
+// caller so v.Field access resolves and a bare alias is rejected. Operand- and
+// wrapper-agnostic: shared by the receive (receive … end) and value (case X of
+// … end) paths. Also returns whether a default: was present, so the value path
+// can require one (a value switch falls through in Go) while the receive path
+// leaves it optional.
+func (em *emitter) emitTypeSwitchClauses(ts *ast.TypeSwitchStmt) ([]string, bool, error) {
+	var clauses []string
+	var deflt string
+	haveDefault := false
+	seenTag := map[string]bool{}
+	for _, s := range ts.Body.List {
+		cc, ok := s.(*ast.CaseClause)
+		if !ok {
+			return nil, false, em.errorf(s, "unsupported type-switch clause")
+		}
+		if len(cc.Body) == 0 {
+			return nil, false, em.errorf(cc, "case clause has no value (empty body)")
+		}
+		if cc.List == nil { // default
+			if haveDefault {
+				return nil, false, em.errorf(cc, "type switch has more than one default")
+			}
+			haveDefault = true
+			body, err := em.emitBranch(cc.Body)
+			if err != nil {
+				return nil, false, err
+			}
+			deflt = body
+			continue
+		}
+		if len(cc.List) != 1 {
+			return nil, false, em.errorf(cc, "multi-type case is unsupported (0.3.6+)")
+		}
+		name, err := em.caseTypeName(cc.List[0])
+		if err != nil {
+			return nil, false, err
+		}
+		tag := strings.ToLower(name)
+		if seenTag[tag] {
+			return nil, false, em.errorf(cc.List[0], "type switch has two cases with the same message tag %q; the second clause would be unreachable in Erlang (e.g. Ping and *Ping, or names differing only in case)", tag)
+		}
+		seenTag[tag] = true
+		snap := maps.Clone(em.bound)
+		pat, err := em.structPattern(name, cc)
+		if err != nil {
+			em.bound = snap
+			return nil, false, err
+		}
+		body, err := em.emitStmts(cc.Body, true)
+		em.bound = snap
+		if err != nil {
+			return nil, false, err
+		}
+		clauses = append(clauses, pat+" -> "+body)
+	}
+	if haveDefault {
+		clauses = append(clauses, "_ -> "+deflt)
+	}
+	return clauses, haveDefault, nil
 }
 
 // caseTypeName returns the declared struct type name of a type-switch case
@@ -748,8 +817,10 @@ func otpPkgIdent(x ast.Expr) bool {
 }
 
 // isReceiveTypeSwitch reports whether ts is `v := otp.Receive().(type)` — a
-// type switch whose operand is otp.Receive(). This is the only type-switch form
-// 0.3.4 supports (lowered to a multi-clause receive); every other form errors.
+// type switch whose operand is otp.Receive(). It selects the receive lowering
+// (a multi-clause receive, default optional) over the plain-value lowering
+// (`case X of`, default required); it also lets terminates() treat a
+// default-less receive switch as terminating while a value switch is not.
 func isReceiveTypeSwitch(ts *ast.TypeSwitchStmt) bool {
 	as, ok := ts.Assign.(*ast.AssignStmt)
 	if !ok || as.Tok != token.DEFINE || len(as.Rhs) != 1 {
@@ -916,7 +987,7 @@ func (em *emitter) emitExpr(e ast.Expr) (string, error) {
 		// Erlang representation (each case binds different fields), so passing the
 		// whole value is unsupported.
 		if em.tsAlias != "" && ex.Name == em.tsAlias {
-			return "", em.errorf(ex, "the type-switch alias %s must be used via field access (%s.Field); passing the whole value is unsupported (0.3.5+)", ex.Name, ex.Name)
+			return "", em.errorf(ex, "the type-switch alias %s must be used via field access (%s.Field); passing the whole value is unsupported (0.3.6+)", ex.Name, ex.Name)
 		}
 		// A pre-bound variable reference (e.g. From/Text bound in a receive
 		// pattern) must be an uppercase-leading Erlang variable. A lowercase

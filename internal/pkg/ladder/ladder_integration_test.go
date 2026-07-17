@@ -189,3 +189,32 @@ func TestRung_TypeSwitchReceive(t *testing.T) {
 		}
 	}
 }
+
+// TestRung_TypeSwitchValue transpiles a 0.3.5 plain-value type switch,
+// compiles it with erlc, and RUNS it — proving the `case X of … end` dispatch
+// closes: a {ping, …} value hits the ping clause, a {pong, …} the pong clause.
+func TestRung_TypeSwitchValue(t *testing.T) {
+	home, _ := os.UserHomeDir()
+	l := erlang.NewLayout(home, erlang.DefaultVersion)
+	if !l.Installed() {
+		t.Skip("local Erlang not installed; run erlang provisioning first")
+	}
+	dir := t.TempDir()
+	erl := transpileToErl(t, filepath.FromSlash("../../../testdata/typeswitch/classify.go"), dir)
+	if out, err := exec.Command(l.Erlc(), "-o", dir, erl).CombinedOutput(); err != nil {
+		t.Fatalf("erlc %s: %v\n%s", erl, err, out)
+	}
+	for _, tc := range []struct{ send, want string }{
+		{"{ping, 1}", "1"},
+		{"{pong, 2}", "2"},
+	} {
+		eval := "io:format(\"~p\", [classify:classify(" + tc.send + ")]), init:stop()."
+		out, err := exec.Command(l.Erl(), "-noshell", "-pa", dir, "-eval", eval).CombinedOutput()
+		if err != nil {
+			t.Fatalf("call %s: %v\n%s", tc.send, err, out)
+		}
+		if got := strings.TrimSpace(string(out)); got != tc.want {
+			t.Fatalf("call %s: got %q, want %q", tc.send, got, tc.want)
+		}
+	}
+}

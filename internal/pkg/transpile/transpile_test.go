@@ -1518,18 +1518,6 @@ func TestModule_TypeSwitchRejects(t *testing.T) {
 		name, src, want string
 	}{
 		{
-			name: "plain value operand",
-			src: `package m
-type Ping struct{ Data int }
-func F(X int) {
-	switch v := X.(type) {
-	case Ping:
-		_ = v
-	}
-}`,
-			want: "plain value",
-		},
-		{
 			name: "non-struct case",
 			src: `package m
 import "go.muehmer.eu/wintermute/pkg/otp"
@@ -1609,5 +1597,179 @@ func F() {
 				t.Fatalf("want %q rejection, got %v", tc.want, err)
 			}
 		})
+	}
+}
+
+func TestModule_TypeSwitchValueWithDefault(t *testing.T) {
+	src := `package m
+import "go.muehmer.eu/wintermute/pkg/otp"
+type Ping struct{ Data int }
+type Pong struct{ Data int }
+func Classify(M any) {
+	switch V := M.(type) {
+	case Ping:
+		otp.Print(V.Data)
+	case Pong:
+		otp.Print(V.Data)
+	default:
+		otp.Print(0)
+	}
+}`
+	r, err := Module(src)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	for _, want := range []string{
+		"case M of",
+		"{ping, Data} -> io:format",
+		"{pong, Data} -> io:format",
+		"_ -> io:format",
+		"end",
+	} {
+		if !strings.Contains(r.Erl, want) {
+			t.Errorf("output missing %q\n%s", want, r.Erl)
+		}
+	}
+}
+
+func TestModule_TypeSwitchValueNoDefaultRejected(t *testing.T) {
+	// A plain-value type switch without a default falls through in Go when no
+	// case matches; a total Erlang `case` cannot express that (it would raise
+	// case_clause instead), so the default-less form is rejected. This differs
+	// from the receive path, which needs no default (a receive blocks, never
+	// falls through).
+	src := `package m
+import "go.muehmer.eu/wintermute/pkg/otp"
+type Ping struct{ Data int }
+type Pong struct{ Data int }
+func Classify(M any) {
+	switch V := M.(type) {
+	case Ping:
+		otp.Print(V.Data)
+	case Pong:
+		otp.Print(V.Data)
+	}
+}`
+	_, err := Module(src)
+	if err == nil || !strings.Contains(err.Error(), "requires a default") {
+		t.Fatalf("want default-required rejection, got %v", err)
+	}
+}
+
+func TestModule_TypeSwitchValueBareIfNoDefaultRejected(t *testing.T) {
+	// Regression (0.3.5 Copilot release gate): a default-less value type switch
+	// as a bare-if then-branch falls through in Go when no case matches (the
+	// function returns the continuation, here 99). Emitted as a terminal Erlang
+	// case clause with no catch-all, an unmatched value raises case_clause
+	// instead — a silent mis-transpile. It must be rejected, not emitted.
+	src := `package m
+type Ping struct{ Data int }
+func Classify(M any, Flag bool) int {
+	if Flag {
+		switch V := M.(type) {
+		case Ping:
+			return V.Data
+		}
+	}
+	return 99
+}`
+	if _, err := Module(src); err == nil {
+		t.Fatal("want rejection of a default-less value switch in a bare-if then-branch, got nil")
+	}
+}
+
+func TestModule_TypeSwitchTaglessRejected(t *testing.T) {
+	// switch M.(type) — no alias binding — is deferred; must be rejected, not
+	// silently accepted with no alias.
+	src := `package m
+import "go.muehmer.eu/wintermute/pkg/otp"
+type Ping struct{ Data int }
+func Classify(M any) {
+	switch M.(type) {
+	case Ping:
+		otp.Print(1)
+	}
+}`
+	_, err := Module(src)
+	if err == nil || !strings.Contains(err.Error(), "must bind an alias") {
+		t.Fatalf("want tagless rejection, got %v", err)
+	}
+}
+
+func TestModule_TypeSwitchValueGuardsInherited(t *testing.T) {
+	otpImport := "import \"go.muehmer.eu/wintermute/pkg/otp\"\n"
+	structs := "type Ping struct{ Data int }\ntype Pong struct{ Data int }\n"
+	cases := []struct {
+		name    string
+		body    string
+		wantSub string
+	}{
+		{
+			name:    "tag collision Ping and *Ping",
+			body:    "switch V := M.(type) {\ncase Ping:\notp.Print(V.Data)\ncase *Ping:\notp.Print(V.Data)\n}",
+			wantSub: "same message tag",
+		},
+		{
+			name:    "bare alias",
+			body:    "switch V := M.(type) {\ncase Ping:\notp.Print(V)\n}",
+			wantSub: "must be used via field access",
+		},
+		{
+			name:    "non-struct case",
+			body:    "switch V := M.(type) {\ncase int:\notp.Print(1)\n}",
+			wantSub: "must name a struct type",
+		},
+		{
+			name:    "multi-type case",
+			body:    "switch V := M.(type) {\ncase Ping, Pong:\notp.Print(1)\n}",
+			wantSub: "multi-type case is unsupported",
+		},
+		{
+			name:    "init statement",
+			body:    "switch N := f(); V := M.(type) {\ncase Ping:\notp.Print(V.Data)\n}",
+			wantSub: "init statement is unsupported",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			src := "package m\n" + otpImport + structs +
+				"func f() any { return 0 }\n" +
+				"func Classify(M any) {\n" + tc.body + "\n}"
+			_, err := Module(src)
+			if err == nil || !strings.Contains(err.Error(), tc.wantSub) {
+				t.Fatalf("want %q, got %v", tc.wantSub, err)
+			}
+		})
+	}
+}
+
+func TestModule_TypeSwitchValueAsBareIfThen(t *testing.T) {
+	// A value type switch WITH a default terminates (every clause, including the
+	// default, returns), so it may be a bare-if then-branch — the value-path
+	// analogue of TestModule_BareIfTypeSwitchReceiveThenAccepted. A default-less
+	// value switch does NOT terminate (it falls through in Go) and is rejected
+	// there (TestModule_TypeSwitchValueBareIfNoDefaultRejected).
+	src := `package m
+type Ping struct{ Data int }
+func Classify(M any, Flag bool) string {
+	if Flag {
+		switch V := M.(type) {
+		case Ping:
+			return V.Data
+		default:
+			return "other"
+		}
+	}
+	return "skip"
+}`
+	r, err := Module(src)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(r.Erl, "case Flag of") {
+		t.Errorf("want the value switch wrapped by the bare-if (case Flag of):\n%s", r.Erl)
+	}
+	if !strings.Contains(r.Erl, "case M of") {
+		t.Errorf("want value switch inside bare-if then-branch:\n%s", r.Erl)
 	}
 }
