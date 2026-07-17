@@ -1267,8 +1267,6 @@ func F(N int) int {
 func F(N int) int { switch N { case 1: fallthrough; default: return 0 } }`, "fallthrough"},
 		{"missing default", `package m
 func F(N int) int { switch N { case 1: return 1 } }`, "default"},
-		{"type switch", `package m
-func F(X interface{}) int { switch X.(type) { case int: return 1; default: return 0 } }`, "type switch"},
 	}
 	for _, c := range cases {
 		_, err := Module(c.src)
@@ -1743,9 +1741,54 @@ func Classify(M any, Flag bool) int {
 	}
 }
 
-func TestModule_TypeSwitchTaglessRejected(t *testing.T) {
-	// switch M.(type) — no alias binding — is deferred; must be rejected, not
-	// silently accepted with no alias.
+func TestModule_TypeSwitchTagless(t *testing.T) {
+	src := `package m
+import "go.muehmer.eu/wintermute/pkg/otp"
+type Ping struct{ Data int }
+func Classify(M any) {
+	switch M.(type) {
+	case Ping:
+		otp.Print(1)
+	case int:
+		otp.Print(2)
+	default:
+		otp.Print(0)
+	}
+}`
+	r, err := Module(src)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	for _, want := range []string{"case M of", "{ping, _} ->", "_X when is_integer(_X) ->", "_ ->"} {
+		if !strings.Contains(r.Erl, want) {
+			t.Errorf("want %q in:\n%s", want, r.Erl)
+		}
+	}
+}
+
+func TestModule_TypeSwitchTaglessReceive(t *testing.T) {
+	src := `package m
+import "go.muehmer.eu/wintermute/pkg/otp"
+type Ping struct{ Data int }
+func Serve() {
+	switch otp.Receive().(type) {
+	case Ping:
+		otp.Print(1)
+	case int:
+		otp.Print(2)
+	}
+}`
+	r, err := Module(src)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(r.Erl, "receive") || !strings.Contains(r.Erl, "{ping, _} ->") || !strings.Contains(r.Erl, "_X when is_integer(_X) ->") {
+		t.Errorf("want tagless receive clauses:\n%s", r.Erl)
+	}
+}
+
+func TestModule_TypeSwitchTaglessValueNoDefaultRejected(t *testing.T) {
+	// A tagless VALUE switch with no default falls through in Go; reject it.
 	src := `package m
 import "go.muehmer.eu/wintermute/pkg/otp"
 type Ping struct{ Data int }
@@ -1756,8 +1799,8 @@ func Classify(M any) {
 	}
 }`
 	_, err := Module(src)
-	if err == nil || !strings.Contains(err.Error(), "must bind an alias") {
-		t.Fatalf("want tagless rejection, got %v", err)
+	if err == nil || !strings.Contains(err.Error(), "requires a default clause") {
+		t.Fatalf("want default-required rejection, got %v", err)
 	}
 }
 
@@ -1775,9 +1818,11 @@ func TestModule_TypeSwitchValueGuardsInherited(t *testing.T) {
 			wantSub: "same message tag",
 		},
 		{
-			name:    "multi-type case",
+			// Multi-type cases are supported since 0.3.7 (TestModule_TypeSwitchMultiType);
+			// the value-path default requirement still applies to them like any other case.
+			name:    "multi-type case without default",
 			body:    "switch V := M.(type) {\ncase Ping, Pong:\notp.Print(1)\n}",
-			wantSub: "multi-type case is unsupported",
+			wantSub: "requires a default clause",
 		},
 		{
 			name:    "init statement",
@@ -1942,6 +1987,32 @@ func Classify(M any) {
 	}
 }
 
+func TestModule_TypeSwitchSingleTypePrimitiveUnusedAlias(t *testing.T) {
+	// A single-type primitive case whose body does NOT use the alias guards the
+	// throwaway variable `_X` (bindAlias is false), not `V`. The `_`-prefix avoids
+	// the erlc "unused variable" warning the old unconditional `V` produced.
+	src := `package m
+import "go.muehmer.eu/wintermute/pkg/otp"
+func Classify(M any) {
+	switch V := M.(type) {
+	case int:
+		otp.Print(1)
+	default:
+		otp.Print(0)
+	}
+}`
+	r, err := Module(src)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(r.Erl, "_X when is_integer(_X) ->") {
+		t.Errorf("want throwaway-guarded clause for an unused alias:\n%s", r.Erl)
+	}
+	if strings.Contains(r.Erl, "V when is_integer(V)") {
+		t.Errorf("must not bind the alias V when the body never uses it:\n%s", r.Erl)
+	}
+}
+
 func TestModule_TypeSwitchReceivePrimitiveGuard(t *testing.T) {
 	// A non-struct case in the receive form is a guarded selective-receive clause
 	// (it blocks on a non-match, never falls through — no default needed).
@@ -2014,5 +2085,194 @@ func Classify(M any) {
 				t.Fatalf("want %q rejection, got %v", tc.want, err)
 			}
 		})
+	}
+}
+
+func TestModule_TypeSwitchNestedSameAliasNoFalseCollision(t *testing.T) {
+	// An outer struct case whose body contains a nested type switch reusing the
+	// same alias name V (valid Go shadowing) must NOT be rejected: the nested V is
+	// the inner switch's binding, not a bare use of the outer alias.
+	src := `package m
+import "go.muehmer.eu/wintermute/pkg/otp"
+type Ping struct{ Data int }
+type Pong struct{ Data int }
+func Classify(M any) {
+	switch V := M.(type) {
+	case Ping:
+		switch V := V.Data.(type) {
+		case int:
+			otp.Print(V)
+		default:
+			otp.Print(0)
+		}
+	default:
+		otp.Print(0)
+	}
+}`
+	if _, err := Module(src); err != nil {
+		t.Fatalf("nested same-alias switch must not be a false collision, got: %v", err)
+	}
+}
+
+func TestModule_TypeSwitchMultiType(t *testing.T) {
+	src := `package m
+import "go.muehmer.eu/wintermute/pkg/otp"
+type Ping struct{ Data int }
+type Pong struct{ Data int }
+func Classify(M any) {
+	switch V := M.(type) {
+	case Ping, Pong:
+		otp.Send(V, V)
+	case int, string:
+		otp.Print(V)
+	default:
+		otp.Print(0)
+	}
+}`
+	r, err := Module(src)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	for _, want := range []string{
+		"V = {ping, _} ->",
+		"V = {pong, _} ->",
+		"V when is_integer(V) ->",
+		"V when is_binary(V) ->",
+		"_ ->",
+	} {
+		if !strings.Contains(r.Erl, want) {
+			t.Errorf("want %q in:\n%s", want, r.Erl)
+		}
+	}
+}
+
+func TestModule_TypeSwitchMultiTypeRejects(t *testing.T) {
+	cases := []struct{ name, src, want string }{
+		{
+			name: "field access in multi-type case",
+			src: `package m
+import "go.muehmer.eu/wintermute/pkg/otp"
+type Ping struct{ Data int }
+type Pong struct{ Data int }
+func Classify(M any) {
+	switch V := M.(type) {
+	case Ping, Pong:
+		otp.Print(V.Data)
+	default:
+		otp.Print(0)
+	}
+}`,
+			want: "field access is not allowed in a multi-type case",
+		},
+		{
+			// The v.Field reject is bypassable by copying the alias first
+			// (W := V; W.Field): emitExpr lowers W.Field to the bare field name,
+			// which in a multi-type clause (fields wildcarded) is unbound or
+			// silently resolves to an unrelated outer binding of that name — a
+			// silent mis-transpile. Copying the alias must be rejected too.
+			name: "alias copied then field-accessed in multi-type case",
+			src: `package m
+type Ping struct{ Data int }
+type Pong struct{ Data int }
+func Classify(M any, Data int) int {
+	switch V := M.(type) {
+	case Ping, Pong:
+		W := V
+		return W.Data
+	default:
+		return Data
+	}
+}`,
+			want: "cannot be copied to another variable in a multi-type case",
+		},
+		{
+			// The copy reject must be transitive: threading the alias through a
+			// call before binding (X := Helper(V); X.Field) is the same bypass one
+			// indirection deeper — X.Field still lowers to a bare field name.
+			name: "alias threaded through a call then field-accessed",
+			src: `package m
+type Ping struct{ Data int }
+type Pong struct{ Data int }
+func Helper(V any) any { return V }
+func Classify(M any, Data int) int {
+	switch V := M.(type) {
+	case Ping, Pong:
+		X := Helper(V)
+		return X.Data
+	default:
+		return Data
+	}
+}`,
+			want: "cannot be copied to another variable in a multi-type case",
+		},
+		{
+			name: "duplicate type within the list",
+			src: `package m
+import "go.muehmer.eu/wintermute/pkg/otp"
+type Ping struct{ Data int }
+func Classify(M any) {
+	switch V := M.(type) {
+	case Ping, Ping:
+		otp.Send(V, V)
+	default:
+		otp.Print(0)
+	}
+}`,
+			want: "same message tag",
+		},
+		{
+			name: "duplicate type across a list and a later case",
+			src: `package m
+import "go.muehmer.eu/wintermute/pkg/otp"
+type Ping struct{ Data int }
+type Pong struct{ Data int }
+func Classify(M any) {
+	switch V := M.(type) {
+	case Ping, Pong:
+		otp.Send(V, V)
+	case Pong:
+		otp.Send(V, V)
+	default:
+		otp.Print(0)
+	}
+}`,
+			want: "same message tag",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := Module(tc.src)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("want %q rejection, got %v", tc.want, err)
+			}
+		})
+	}
+}
+
+func TestModule_TypeSwitchMultiTypeNoBareAlias(t *testing.T) {
+	// A multi-type case whose body ignores the value wildcards the struct fields
+	// and guards the throwaway variable — no alias binding.
+	src := `package m
+import "go.muehmer.eu/wintermute/pkg/otp"
+type Ping struct{ Data int }
+type Pong struct{ Data int }
+func Classify(M any) {
+	switch V := M.(type) {
+	case Ping, Pong:
+		otp.Print(1)
+	case int, string:
+		otp.Print(2)
+	default:
+		otp.Print(0)
+	}
+}`
+	r, err := Module(src)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	for _, want := range []string{"{ping, _} ->", "{pong, _} ->", "_X when is_integer(_X) ->", "_X when is_binary(_X) ->"} {
+		if !strings.Contains(r.Erl, want) {
+			t.Errorf("want %q in:\n%s", want, r.Erl)
+		}
 	}
 }

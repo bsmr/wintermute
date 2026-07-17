@@ -250,3 +250,37 @@ func TestRung_TypeSwitchMixed(t *testing.T) {
 		}
 	}
 }
+
+// TestRung_TypeSwitchTagMulti transpiles the 0.3.7 tagmulti rung — a
+// plain-value type switch combining a multi-type case (case Ping, Pong:), a
+// primitive-guard case, and a default in one function — compiles it with
+// erlc, and RUNS it: either a Ping or a Pong tuple hits the shared
+// multi-type clause (whole value ignored, constant body), an int hits the
+// is_integer guard (whole-alias V), and anything else hits the default.
+func TestRung_TypeSwitchTagMulti(t *testing.T) {
+	home, _ := os.UserHomeDir()
+	l := erlang.NewLayout(home, erlang.DefaultVersion)
+	if !l.Installed() {
+		t.Skip("local Erlang not installed; run erlang provisioning first")
+	}
+	dir := t.TempDir()
+	erl := transpileToErl(t, filepath.FromSlash("../../../testdata/typeswitch/tagmulti/tagmulti.go"), dir)
+	if out, err := exec.Command(l.Erlc(), "-o", dir, erl).CombinedOutput(); err != nil {
+		t.Fatalf("erlc %s: %v\n%s", erl, err, out)
+	}
+	for _, tc := range []struct{ send, want string }{
+		{"{ping, 5}", "1"}, // multi-type case, either tag → 1
+		{"{pong, 9}", "1"},
+		{"7", "7"},       // int arm → whole-alias V
+		{"an_atom", "0"}, // default
+	} {
+		eval := "io:format(\"~p\", [tagmulti:classify(" + tc.send + ")]), init:stop()."
+		out, err := exec.Command(l.Erl(), "-noshell", "-pa", dir, "-eval", eval).CombinedOutput()
+		if err != nil {
+			t.Fatalf("call %s: %v\n%s", tc.send, err, out)
+		}
+		if got := strings.TrimSpace(string(out)); got != tc.want {
+			t.Fatalf("call %s: got %q, want %q", tc.send, got, tc.want)
+		}
+	}
+}
