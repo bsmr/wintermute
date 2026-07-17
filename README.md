@@ -94,8 +94,8 @@ notes: **[github.com/bsmr/wintermute/releases](https://github.com/bsmr/wintermut
 | **0.1.x** | `0.1.0` Go→Erlang echo interop ladder |
 | **0.2.x** — deployment | `0.2.0` hardening · `0.2.1` distributed interop · `0.2.2` gen_server model · `0.2.3` OTP application · `0.2.4` persistent node · `0.2.5` full OTP release · `0.2.6` self-contained target system · `0.2.7` native Erlang interop |
 | **0.3.0** — promotion | consolidation of the 0.2.x line: control-node hardening + security-review sweep |
-| **0.3.x** — transpiler language | `0.3.1` value model (function parameters, `return`, local `:=`, calls-with-args, recursion) · `0.3.2` control flow (full operator set, `if`/`else` → `case`) · `0.3.3` switch (tagged `switch` → `case`, integer-literal normalization) · `0.3.4` type-switch receive (`switch v := otp.Receive().(type)` → multi-clause `receive`) · `0.3.5` plain-value type switch (`switch v := x.(type)` → `case x of`) |
-| **next** | wider type switch (non-struct guards, multi-type cases, whole-alias), `switch` guards, full gen_server callbacks, `gen_statem`/`gen_event` |
+| **0.3.x** — transpiler language | `0.3.1` value model (function parameters, `return`, local `:=`, calls-with-args, recursion) · `0.3.2` control flow (full operator set, `if`/`else` → `case`) · `0.3.3` switch (tagged `switch` → `case`, integer-literal normalization) · `0.3.4` type-switch receive (`switch v := otp.Receive().(type)` → multi-clause `receive`) · `0.3.5` plain-value type switch (`switch v := x.(type)` → `case x of`) · `0.3.6` non-struct type-switch cases (`case int`/`string`/`bool`/`float64` → type guards) + whole-alias `V` |
+| **next** | wider type switch (multi-type cases, tagless form), `switch` guards, full gen_server callbacks, `gen_statem`/`gen_event` |
 
 ### What Wintermute transpiles today
 
@@ -111,7 +111,9 @@ The transpiler covers a deliberately small, cleanly-mapping subset of Go:
   `switch` → `case`, self-recursion, single-clause `receive`, the
   type-switch receive (`switch v := otp.Receive().(type)` → multi-clause
   `receive`), and the plain-value type switch (`switch v := x.(type)` over any
-  value → `case x of`).
+  value → `case x of`) — including non-struct cases over `int`/`string`/`bool`/
+  `float64` (→ Erlang type guards `is_integer`/`is_binary`/`is_boolean`/
+  `is_float`) and binding the alias to the whole matched value (whole-alias `V`).
 
 Anything outside the subset — records, complex guards, binary matching, list
 comprehensions, macros — is written as a hand-written `.erl` module (the native
@@ -130,7 +132,7 @@ fast with the missing ones named.
 
 ## Status
 
-> ⚠️ **Early Development / Experimental** — current release: **0.3.5**
+> ⚠️ **Early Development / Experimental** — current release: **0.3.6**
 
 Early and experimental, but functional. The deployment line (0.2.x) is
 feature-complete for the echo interop subset: Go transpiles to real Erlang/OTP
@@ -140,7 +142,8 @@ hand-written native Erlang — all on OTP 29. The 0.3.x line is actively widenin
 the transpiler itself: function parameters, `return` values, local bindings, the
 full operator set, `if`/`else` → `case` control flow (making recursion useful),
 tagged `switch`, and the type switch — both over a received message
-(`otp.Receive()`) and over any plain value (`case x of`) — have shipped.
+(`otp.Receive()`) and over any plain value (`case x of`), now with non-struct
+type guards and whole-alias binding — have shipped.
 Contributions, ideas, and discussions are welcome.
 
 ---
