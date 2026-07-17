@@ -651,8 +651,11 @@ func wrapClauses(header string, clauses []string) string {
 }
 
 // emitTypeSwitchClauses emits the ordered Erlang clauses for a type switch's
-// case bodies: one "Pattern -> Body" per struct case, plus a trailing
-// "_ -> Body" when a default: is present. Each clause names a single declared
+// case bodies: one "Pattern -> Body" per struct case, plus a trailing default
+// clause when a default: is present — "_ -> Body" normally, or "V -> Body"
+// (the alias itself, a total catch-all binding) when the default body uses
+// the alias as a bare value, since Go's `default` binds it to the whole
+// original value. Each clause names a single declared
 // struct type (caseTypeName), binds its fields in a snapshotted em.bound scope
 // (structPattern), and two cases lowering to the same message tag are rejected
 // (the second would be unreachable in Erlang). em.tsAlias must be set by the
@@ -664,6 +667,7 @@ func wrapClauses(header string, clauses []string) string {
 func (em *emitter) emitTypeSwitchClauses(ts *ast.TypeSwitchStmt) ([]string, bool, error) {
 	var clauses []string
 	var deflt string
+	defaultPattern := "_"
 	haveDefault := false
 	seenTag := map[string]bool{}
 	for _, s := range ts.Body.List {
@@ -679,6 +683,27 @@ func (em *emitter) emitTypeSwitchClauses(ts *ast.TypeSwitchStmt) ([]string, bool
 				return nil, false, em.errorf(cc, "type switch has more than one default")
 			}
 			haveDefault = true
+			// Go's `default` binds the alias to the WHOLE original value; a bare
+			// V in the default body must lower to a bound catch-all `V -> Body`
+			// (total, matches anything), not the unbound `_ -> Body` used when
+			// the body never references V. registerAlias mutates em.bound before
+			// emitBranch's own snapshot/restore runs, so the pre-registration
+			// snapshot is taken here and restored after emitting the body — the
+			// binding must not leak past the default clause.
+			if bodyUsesBareAlias(cc.Body, em.tsAlias) {
+				snap := maps.Clone(em.bound)
+				if err := em.registerAlias(cc); err != nil {
+					return nil, false, err
+				}
+				body, err := em.emitBranch(cc.Body)
+				if err != nil {
+					return nil, false, err
+				}
+				em.bound = snap
+				deflt = body
+				defaultPattern = em.tsAlias
+				continue
+			}
 			body, err := em.emitBranch(cc.Body)
 			if err != nil {
 				return nil, false, err
@@ -687,54 +712,105 @@ func (em *emitter) emitTypeSwitchClauses(ts *ast.TypeSwitchStmt) ([]string, bool
 			continue
 		}
 		if len(cc.List) != 1 {
-			return nil, false, em.errorf(cc, "multi-type case is unsupported (0.3.6+)")
+			return nil, false, em.errorf(cc, "multi-type case is unsupported (0.3.7+)")
 		}
-		name, err := em.caseTypeName(cc.List[0])
+		name, guard, err := em.caseTypeName(cc.List[0])
 		if err != nil {
 			return nil, false, err
 		}
-		tag := strings.ToLower(name)
-		if seenTag[tag] {
-			return nil, false, em.errorf(cc.List[0], "type switch has two cases with the same message tag %q; the second clause would be unreachable in Erlang (e.g. Ping and *Ping, or names differing only in case)", tag)
-		}
-		seenTag[tag] = true
-		snap := maps.Clone(em.bound)
-		pat, err := em.structPattern(name, cc)
-		if err != nil {
-			em.bound = snap
-			return nil, false, err
-		}
-		body, err := em.emitStmts(cc.Body, true)
-		em.bound = snap
+		clause, err := em.emitCaseClause(cc, name, guard, seenTag)
 		if err != nil {
 			return nil, false, err
 		}
-		clauses = append(clauses, pat+" -> "+body)
+		clauses = append(clauses, clause)
 	}
 	if haveDefault {
-		clauses = append(clauses, "_ -> "+deflt)
+		clauses = append(clauses, defaultPattern+" -> "+deflt)
 	}
 	return clauses, haveDefault, nil
 }
 
-// caseTypeName returns the declared struct type name of a type-switch case
-// expression, accepting both `Ping` and `*Ping` (Erlang has no pointers, so the
-// star is meaningless). It errors if the case is not an identifier, or names a
-// type that is not a declared struct — both mean "does not name a struct type".
-// (The single-clause receive path reports an unknown type separately via
-// structPattern; here the check lives with the ident/pointer parsing.)
-func (em *emitter) caseTypeName(e ast.Expr) (string, error) {
+// primitiveGuard maps a supported non-struct type-switch case type to its Erlang
+// type guard. The four guards are pairwise disjoint (and disjoint from
+// atom-tagged struct tuples), so Erlang's runtime first-match order coincides
+// with Go's static per-case type exclusivity.
+var primitiveGuard = map[string]string{
+	"int":     "is_integer",
+	"string":  "is_binary",
+	"bool":    "is_boolean",
+	"float64": "is_float",
+}
+
+// emitCaseClause emits one non-default type-switch clause "Pattern[ Guard] -> Body".
+// guard == "" is the struct form (tuple pattern {tag, Fields}, optionally aliased
+// V = {tag, Fields} when the body uses the whole value); a non-empty guard is the
+// primitive form (the alias variable guarded, e.g. V when is_integer(V)). It
+// dedups on the clause's runtime discriminant (a lowercased struct tag or the
+// guard name — these never collide, and a guard and a tuple are disjoint) and
+// snapshots/restores em.bound around the clause.
+func (em *emitter) emitCaseClause(cc *ast.CaseClause, name, guard string, seenTag map[string]bool) (string, error) {
+	key := "t:" + strings.ToLower(name)
+	if guard != "" {
+		key = "g:" + guard
+	}
+	if seenTag[key] {
+		if guard != "" {
+			return "", em.errorf(cc.List[0], "type switch has two cases of type %s; the second clause would be unreachable in Erlang", name)
+		}
+		return "", em.errorf(cc.List[0], "type switch has two cases with the same message tag %q; the second clause would be unreachable in Erlang (e.g. Ping and *Ping, or names differing only in case)", strings.ToLower(name))
+	}
+	seenTag[key] = true
+
+	snap := maps.Clone(em.bound)
+	defer func() { em.bound = snap }()
+
+	if guard != "" { // primitive case: `V when is_T(V) -> Body`
+		if err := em.registerAlias(cc); err != nil {
+			return "", err
+		}
+		body, err := em.emitStmts(cc.Body, true)
+		if err != nil {
+			return "", err
+		}
+		return em.tsAlias + " when " + guard + "(" + em.tsAlias + ") -> " + body, nil
+	}
+
+	pat, err := em.structPattern(name, cc)
+	if err != nil {
+		return "", err
+	}
+	if bodyUsesBareAlias(cc.Body, em.tsAlias) {
+		if err := em.registerAlias(cc); err != nil {
+			return "", err
+		}
+		pat = em.tsAlias + " = " + pat
+	}
+	body, err := em.emitStmts(cc.Body, true)
+	if err != nil {
+		return "", err
+	}
+	return pat + " -> " + body, nil
+}
+
+// caseTypeName classifies a single type-switch case expression, accepting both
+// `T` and `*T` (Erlang has no pointers, so the star is meaningless). For a
+// declared struct it returns (name, "", nil); for a supported primitive it
+// returns (name, guard, nil); anything else is rejected.
+func (em *emitter) caseTypeName(e ast.Expr) (name, guard string, err error) {
 	if star, ok := e.(*ast.StarExpr); ok {
 		e = star.X
 	}
 	id, ok := e.(*ast.Ident)
 	if !ok {
-		return "", em.errorf(e, "type switch case must name a struct type")
+		return "", "", em.errorf(e, "type switch case must name a type")
 	}
-	if _, ok := em.structs[id.Name]; !ok {
-		return "", em.errorf(e, "type switch case must name a struct type (got %s)", id.Name)
+	if _, ok := em.structs[id.Name]; ok {
+		return id.Name, "", nil
 	}
-	return id.Name, nil
+	if g, ok := primitiveGuard[id.Name]; ok {
+		return id.Name, g, nil
+	}
+	return "", "", em.errorf(e, "unsupported type-switch case type %s; only declared structs and int/string/bool/float64 are supported (0.3.7+)", id.Name)
 }
 
 // switchFallthrough returns the fallthrough statement in a case body, or nil.
@@ -768,6 +844,59 @@ func (em *emitter) structPattern(typeName string, at ast.Node) (string, error) {
 		parts = append(parts, fld)
 	}
 	return "{" + strings.Join(parts, ", ") + "}", nil
+}
+
+// registerAlias binds the type-switch alias as an Erlang variable in the current
+// (snapshotted) bound scope. It rejects a lowercase alias (which would emit an
+// Erlang atom, not a variable) and a collision with an already-bound name (a
+// parameter, a prior :=, or a struct field — in Erlang a rebind is an equality
+// match, not a fresh binding). Call it only when the clause actually uses the
+// alias as an Erlang variable.
+func (em *emitter) registerAlias(at ast.Node) error {
+	a := em.tsAlias
+	if !token.IsExported(a) {
+		return em.errorf(at, "type-switch alias %s is lowercase-leading; Erlang variables must be uppercase", a)
+	}
+	if em.bound[a] {
+		return em.errorf(at, "type-switch alias %s collides with an already-bound name (a parameter, a prior :=, or a struct field); Erlang would treat it as an equality match, not a fresh binding — rename one", a)
+	}
+	em.bound[a] = true
+	return nil
+}
+
+// bodyUsesBareAlias reports whether any statement in body references the
+// type-switch alias as a whole value (a bare identifier) rather than only via
+// field access (alias.Field). It drives whether a struct clause binds the whole
+// tuple (V = {tag, Fields}); emitExpr lowers exactly the same bare references to
+// the Erlang variable, so detection and emission stay in lockstep.
+func bodyUsesBareAlias(body []ast.Stmt, alias string) bool {
+	// Two passes: a *ast.SelectorExpr's .Sel is always a field name (never a
+	// bare-variable use of the alias), and its .X, when it is the alias ident,
+	// is the field-access receiver (not a bare use). Both idents are collected
+	// into a skip-set first, so an unrelated selector's field named like the
+	// alias (e.g. W.V when the alias is V) is never misdetected as a bare use.
+	skip := map[*ast.Ident]bool{}
+	for _, s := range body {
+		ast.Inspect(s, func(n ast.Node) bool {
+			if sel, ok := n.(*ast.SelectorExpr); ok {
+				skip[sel.Sel] = true // field name, never a bare use
+				if id, ok := sel.X.(*ast.Ident); ok {
+					skip[id] = true // receiver of field access, not a bare use
+				}
+			}
+			return true
+		})
+	}
+	used := false
+	for _, s := range body {
+		ast.Inspect(s, func(n ast.Node) bool {
+			if id, ok := n.(*ast.Ident); ok && id.Name == alias && !skip[id] {
+				used = true
+			}
+			return true
+		})
+	}
+	return used
 }
 
 // receiveHead recognizes a leading `x := otp.Receive().(T)` statement, returns
@@ -982,13 +1111,12 @@ func (em *emitter) emitExpr(e ast.Expr) (string, error) {
 		}
 		return "", em.errorf(ex, "unsupported selector")
 	case *ast.Ident:
-		// The active type-switch alias (e.g. `v` in `switch v := otp.Receive().(type)`)
-		// must be used via field access (v.Field); the alias itself has no direct
-		// Erlang representation (each case binds different fields), so passing the
-		// whole value is unsupported.
-		if em.tsAlias != "" && ex.Name == em.tsAlias {
-			return "", em.errorf(ex, "the type-switch alias %s must be used via field access (%s.Field); passing the whole value is unsupported (0.3.6+)", ex.Name, ex.Name)
-		}
+		// The active type-switch alias (e.g. `V` in `switch V := otp.Receive().(type)`)
+		// is emitted as its Erlang variable when the clause binds it (whole-alias:
+		// V = {tag, Fields}, see emitCaseClause/bodyUsesBareAlias); an uppercase bare
+		// alias falls through to the token.IsExported branch below like any other
+		// bound variable, a lowercase one is rejected there too.
+		//
 		// A pre-bound variable reference (e.g. From/Text bound in a receive
 		// pattern) must be an uppercase-leading Erlang variable. A lowercase
 		// ident would emit an Erlang atom, not a variable — silently wrong —

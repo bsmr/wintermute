@@ -218,3 +218,35 @@ func TestRung_TypeSwitchValue(t *testing.T) {
 		}
 	}
 }
+
+// TestRung_TypeSwitchMixed transpiles the 0.3.6 mixed rung — a plain-value
+// type switch combining a primitive-guard case, a struct case, and a
+// default in one function — compiles it with erlc, and RUNS it: an int hits
+// the is_integer guard (whole-alias V), a Ping tuple hits the struct clause
+// (its Seq field), and anything else hits the default catch-all.
+func TestRung_TypeSwitchMixed(t *testing.T) {
+	home, _ := os.UserHomeDir()
+	l := erlang.NewLayout(home, erlang.DefaultVersion)
+	if !l.Installed() {
+		t.Skip("local Erlang not installed; run erlang provisioning first")
+	}
+	dir := t.TempDir()
+	erl := transpileToErl(t, filepath.FromSlash("../../../testdata/typeswitch/mixed/classify_mixed.go"), dir)
+	if out, err := exec.Command(l.Erlc(), "-o", dir, erl).CombinedOutput(); err != nil {
+		t.Fatalf("erlc %s: %v\n%s", erl, err, out)
+	}
+	for _, tc := range []struct{ send, want string }{
+		{"7", "7"},         // int → is_integer guard, returns whole-alias V
+		{"{ping, 3}", "3"}, // struct clause → field Seq
+		{"an_atom", "0"},   // neither → default catch-all
+	} {
+		eval := "io:format(\"~p\", [mixed:classify(" + tc.send + ")]), init:stop()."
+		out, err := exec.Command(l.Erl(), "-noshell", "-pa", dir, "-eval", eval).CombinedOutput()
+		if err != nil {
+			t.Fatalf("call %s: %v\n%s", tc.send, err, out)
+		}
+		if got := strings.TrimSpace(string(out)); got != tc.want {
+			t.Fatalf("call %s: got %q, want %q", tc.send, got, tc.want)
+		}
+	}
+}
